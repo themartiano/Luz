@@ -1,6 +1,7 @@
 #include "SceneFile/SceneFile.hpp"
 #include "SceneFileInternal.hpp"
 #include "ANSIColors.hpp"
+#include "Clock.hpp"
 #include "Utilities.hpp"
 #include <algorithm>
 #include <fstream>
@@ -255,6 +256,9 @@ namespace
 // Searches and reads / parses the Scene file named 'fileName' into 'Scene' (searches in the current directory)
 void	SceneFile::read(Scene& scene, std::string fileName)
 {
+	Clock sceneFileClock;
+
+	sceneFileClock.start();
 	scene.setIsFromFile(true);
 
 	std::ifstream stream;
@@ -267,12 +271,13 @@ void	SceneFile::read(Scene& scene, std::string fileName)
 	const std::filesystem::path scenePath(fileName);
 	ObjLoadProgress meshLoadProgress;
 	internal::SceneFileContext context;
-		context.baseDirectory = scenePath.parent_path();
-		meshLoadProgress.total = countSceneMeshLoads(fileName);
-		context.meshLoadConcurrency = meshLoadConcurrency(std::max(meshLoadProgress.total, countSceneMeshUses(fileName)));
-		if (meshLoadProgress.total > 0)
-		{
-			context.meshLoadProgress = &meshLoadProgress;
+	context.baseDirectory = scenePath.parent_path();
+	meshLoadProgress.total = countSceneMeshLoads(fileName);
+	meshLoadProgress.outputEnabled = !scene.getBenchmarkMode();
+	context.meshLoadConcurrency = meshLoadConcurrency(std::max(meshLoadProgress.total, countSceneMeshUses(fileName)));
+	if (meshLoadProgress.total > 0)
+	{
+		context.meshLoadProgress = &meshLoadProgress;
 	}
 
 	std::string line;
@@ -318,4 +323,11 @@ void	SceneFile::read(Scene& scene, std::string fileName)
 		pendingMeshLoad.get();
 	}
 	scene.syncAtmosphereSunDirection();
+	const double sceneFileMS = sceneFileClock.elapsedMS();
+	SceneRenderStats stats = scene.getRenderStats();
+	stats.modelLoadMS += meshLoadProgress.elapsedMS;
+	stats.sceneBuildMS += std::max(0.0, sceneFileMS - meshLoadProgress.elapsedMS);
+	stats.modelLoadProgressShown = stats.modelLoadProgressShown
+		|| (meshLoadProgress.started && meshLoadProgress.outputEnabled);
+	scene.setRenderStats(stats);
 }

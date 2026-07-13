@@ -17,10 +17,13 @@ struct	SceneRenderStats
 {
 	std::size_t	renderedSamples = 0;
 	double		averageSamplesPerPixel = 0.0;
+	double		modelLoadMS = 0.0;
+	double		sceneBuildMS = 0.0;
 	double		renderMS = 0.0;
 	double		denoiseMS = 0.0;
 	double		postProcessMS = 0.0;
 	double		totalMS = 0.0;
+	bool		modelLoadProgressShown = false;
 };
 
 class	Scene

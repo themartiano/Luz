@@ -234,7 +234,7 @@ monotonic_ns()
 	fi
 }
 
-echo "case,run,elapsed_ms,samples_per_second,width,height,samples,bounces,threads,seed,view_transform,bloom,adaptive,denoise,git_commit,git_status,compiler,system,score,rendered_samples,average_spp,actual_samples_per_second,actual_score,render_samples_per_second,render_score,render_ms,denoise_ms,postprocess_ms,total_ms"
+echo "case,run,elapsed_ms,samples_per_second,width,height,samples,bounces,threads,seed,view_transform,bloom,adaptive,denoise,git_commit,git_status,compiler,system,score,rendered_samples,average_spp,actual_samples_per_second,actual_score,render_samples_per_second,render_score,model_load_ms,scene_build_ms,render_ms,denoise_ms,postprocess_ms,total_ms"
 
 case_scores=()
 for benchmark_case in $cases; do
@@ -299,6 +299,8 @@ for benchmark_case in $cases; do
 		score=$(awk -v samples_per_second="$samples_per_second" -v score_sample_unit="$score_sample_unit" 'BEGIN { printf "%.2f", samples_per_second * 60.0 / score_sample_unit }')
 		rendered_samples=$(printf '%s\n' "$run_output" | stat_from_output rendered_samples || true)
 		average_spp=$(printf '%s\n' "$run_output" | stat_from_output avg_spp || true)
+		model_load_ms=$(printf '%s\n' "$run_output" | stat_from_output model_load_ms || true)
+		scene_build_ms=$(printf '%s\n' "$run_output" | stat_from_output scene_build_ms || true)
 		render_ms=$(printf '%s\n' "$run_output" | stat_from_output render_ms || true)
 		denoise_ms=$(printf '%s\n' "$run_output" | stat_from_output denoise_ms || true)
 		postprocess_ms=$(printf '%s\n' "$run_output" | stat_from_output postprocess_ms || true)
@@ -319,7 +321,7 @@ for benchmark_case in $cases; do
 				render_score=$(awk -v samples_per_second="$render_samples_per_second" -v score_sample_unit="$score_sample_unit" 'BEGIN { printf "%.2f", samples_per_second * 60.0 / score_sample_unit }')
 			fi
 		fi
-		echo "$benchmark_case,$n,$elapsed_ms,$samples_per_second,$width,$height,$samples,$bounces,$threads,$seed,$view_transform,$bloom,$adaptive,$denoise,$git_commit,$git_status,$compiler,$system,$score,$rendered_samples,$average_spp,$actual_samples_per_second,$actual_score,$render_samples_per_second,$render_score,$render_ms,$denoise_ms,$postprocess_ms,$total_ms"
+		echo "$benchmark_case,$n,$elapsed_ms,$samples_per_second,$width,$height,$samples,$bounces,$threads,$seed,$view_transform,$bloom,$adaptive,$denoise,$git_commit,$git_status,$compiler,$system,$score,$rendered_samples,$average_spp,$actual_samples_per_second,$actual_score,$render_samples_per_second,$render_score,$model_load_ms,$scene_build_ms,$render_ms,$denoise_ms,$postprocess_ms,$total_ms"
 	done
 
 	case_score=$(print_case_summary_and_score "$benchmark_case" "$width" "$height" "$samples" "${times[@]}")

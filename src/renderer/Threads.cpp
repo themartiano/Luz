@@ -3,6 +3,7 @@
 #include "ANSIColors.hpp"
 #include "Utilities.hpp"
 #include "Clock.hpp"
+#include "TerminalProgress.hpp"
 #include "Blur/Gaussian.hpp"
 #include "Denoise/NFOR.hpp"
 #include "Random.hpp"
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <memory>
 
 namespace
 {
@@ -98,25 +100,15 @@ namespace
 		image.suppressIsolatedFireflies();
 	}
 
-	void	printRenderProgress(unsigned int percentage)
+	void	updateDenoiseProgress(unsigned int percentage, void* userData)
 	{
-		std::cout
-			<< "\r" << CLR_CYAN << "Rendering: "
-			<< CLR_WHITE << "[ " << percentage << "% ]"
-			<< CLR_RESET << std::flush;
-	}
+		TerminalProgress::PhaseProgress* progress =
+			static_cast<TerminalProgress::PhaseProgress*>(userData);
 
-	void	printDenoiseProgress(unsigned int percentage, void*)
-	{
-		std::cout
-			<< "\r" << CLR_CYAN << "Denoising: "
-			<< CLR_WHITE << "[ " << percentage << "% ]"
-			<< CLR_RESET << std::flush;
-	}
-
-	void	printSkippingDenoising(void)
-	{
-		std::cout << CLR_YELLOW << "Skipping denoising." << CLR_RESET << std::endl;
+		if (progress != nullptr)
+		{
+			progress->update(percentage);
+		}
 	}
 
 	Color	cleanColor(Color color)
@@ -383,10 +375,16 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 	const std::uint32_t	renderSeed = hasRandomSeed()
 		? static_cast<std::uint32_t>(randomSeedValue())
 		: randomEngine.integer();
-	SceneRenderStats	stats;
+	SceneRenderStats	stats = scene.getRenderStats();
 
 	Sampler::setRenderSeed(renderSeed);
-	scene.resetRenderStats();
+	stats.renderedSamples = 0;
+	stats.averageSamplesPerPixel = 0.0;
+	stats.renderMS = 0.0;
+	stats.denoiseMS = 0.0;
+	stats.postProcessMS = 0.0;
+	stats.totalMS = 0.0;
+	scene.setRenderStats(stats);
 	scene.clearDenoisedImage();
 	if (scene.getDenoise())
 	{
@@ -405,6 +403,14 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 
 	Clock renderClock;
 	renderClock.start();
+	if (!scene.getBenchmarkMode())
+	{
+		std::cout << std::endl;
+	}
+	TerminalProgress::PhaseProgress renderProgress(
+		"Render",
+		!scene.getBenchmarkMode()
+	);
 
 	// Creates threads.
 	for (std::size_t i = 0; i < threadCount; i++)
@@ -450,41 +456,48 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 		));
 	}
 
-	// Outputs progress using the main thread until the render is complete.
-	while (true)
+	if (scene.getBenchmarkMode())
 	{
-		std::size_t localRenderPixel = completedRenderPixels.load();
-		if (localRenderPixel >= pixelTotal)
-		{
-			break;
-		}
-
-		if (!scene.getBenchmarkMode())
-		{
-			int percentage = (double(localRenderPixel) / double(pixelTotal)) * 100.0;
-			printRenderProgress(static_cast<unsigned int>(percentage));
-		}
-
-		std::this_thread::sleep_for(std::chrono::milliseconds(42));
-
-		bool allWorkersFinished = true;
 		for (std::future<void>& future : futureVector)
 		{
-			if (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
-			{
-				allWorkersFinished = false;
-				break;
-			}
-		}
-		if (allWorkersFinished)
-		{
-			break;
+			future.get();
 		}
 	}
-
-	for (std::future<void>& future : futureVector)
+	else
 	{
-		future.get();
+		// The coordinator reports progress on a throttle; workers never print.
+		while (true)
+		{
+			std::size_t localRenderPixel = completedRenderPixels.load();
+			if (localRenderPixel >= pixelTotal)
+			{
+				break;
+			}
+
+			int percentage = (double(localRenderPixel) / double(pixelTotal)) * 100.0;
+			renderProgress.update(static_cast<unsigned int>(percentage));
+
+			bool allWorkersFinished = true;
+			for (std::future<void>& future : futureVector)
+			{
+				if (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+				{
+					allWorkersFinished = false;
+					break;
+				}
+			}
+			if (allWorkersFinished)
+			{
+				break;
+			}
+
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		for (std::future<void>& future : futureVector)
+		{
+			future.get();
+		}
 	}
 
 	stats.renderMS = renderClock.elapsedMS();
@@ -496,54 +509,77 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 	}
 
 	if (!scene.getBenchmarkMode())
-	{
-		printRenderProgress(100);
-		std::cout << std::endl;
-		if (scene.getAdaptiveSampling() && pixelTotal > 0)
 		{
-			const double averageSamples = static_cast<double>(completedRenderSamples.load())
-				/ static_cast<double>(pixelTotal);
-			std::cout
-				<< CLR_GREEN_BRIGHT << "Average samples per pixel: "
-				<< CLR_WHITE << averageSamples
-				<< CLR_BLUE_BRIGHT << " / " << scene.getSampleCount()
+			renderProgress.finish(stats.renderMS);
+			if (scene.getAdaptiveSampling() && pixelTotal > 0)
+			{
+				const double averageSamples = static_cast<double>(completedRenderSamples.load())
+					/ static_cast<double>(pixelTotal);
+				std::cout
+					<< std::endl
+					<< CLR_GREEN_BRIGHT << "Average samples per pixel: "
+					<< CLR_WHITE << averageSamples
+					<< CLR_BLUE_BRIGHT << " / " << scene.getSampleCount()
 				<< CLR_RESET << std::endl;
 		}
 	}
 
+	std::unique_ptr<Image> denoisedImage;
 	if (scene.getDenoise() && scene.getDenoiseBuffers() != nullptr)
 	{
 		Denoise::NFORSettings nforSettings;
 		Clock denoiseClock;
-
-		nforSettings.threadCount = scene.getRenderingThreads();
-		if (!scene.getBenchmarkMode())
-		{
-			nforSettings.progressCallback = printDenoiseProgress;
-		}
-		denoiseClock.start();
-		auto denoisedImage = Denoise::applyNFOR(*scene.getDenoiseBuffers(), nforSettings);
-		stats.denoiseMS = denoiseClock.elapsedMS();
 		if (!scene.getBenchmarkMode())
 		{
 			std::cout << std::endl;
 		}
-		Clock postProcessClock;
-		postProcessClock.start();
-		applyPostProcessing(scene, *denoisedImage);
-		stats.postProcessMS += postProcessClock.elapsedMS();
-		scene.setDenoisedImage(std::move(denoisedImage));
+		TerminalProgress::PhaseProgress denoiseProgress(
+			"Denoise",
+			!scene.getBenchmarkMode()
+		);
+
+		nforSettings.threadCount = scene.getRenderingThreads();
+		if (!scene.getBenchmarkMode())
+		{
+			nforSettings.progressCallback = updateDenoiseProgress;
+			nforSettings.progressUserData = &denoiseProgress;
+		}
+		denoiseClock.start();
+		denoisedImage = Denoise::applyNFOR(*scene.getDenoiseBuffers(), nforSettings);
+		stats.denoiseMS = denoiseClock.elapsedMS();
+		if (!scene.getBenchmarkMode())
+		{
+			denoiseProgress.finish(stats.denoiseMS);
+		}
 		scene.clearDenoiseBuffers();
 	}
-	else if (!scene.getBenchmarkMode())
+	else
 	{
-		printSkippingDenoising();
+		stats.denoiseMS = 0.0;
 	}
 
 	Clock postProcessClock;
+	if (!scene.getBenchmarkMode() && denoisedImage == nullptr)
+	{
+		std::cout << std::endl;
+	}
+	TerminalProgress::PhaseProgress postProcessProgress(
+		"Post process",
+		!scene.getBenchmarkMode()
+	);
 	postProcessClock.start();
+	if (denoisedImage != nullptr)
+	{
+		applyPostProcessing(scene, *denoisedImage);
+		postProcessProgress.update(50);
+		scene.setDenoisedImage(std::move(denoisedImage));
+	}
 	applyPostProcessing(scene, *scene.getImage());
-	stats.postProcessMS += postProcessClock.elapsedMS();
+	stats.postProcessMS = postProcessClock.elapsedMS();
+	if (!scene.getBenchmarkMode())
+	{
+		postProcessProgress.finish(stats.postProcessMS);
+	}
 	scene.setRenderStats(stats);
 }
 
