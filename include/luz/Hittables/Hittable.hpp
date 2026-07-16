@@ -62,6 +62,7 @@ class   Hittable
 		virtual ~Hittable(void) = default;
 		virtual bool		hit(Ray& ray, HitRecord& hitRecord, double t_min, double t_max) const = 0;
 		virtual bool		hitAny(Ray& ray, double t_min, double t_max) const;
+		virtual Color	shadowTransmittance(Ray& ray, double t_min, double t_max) const;
 		virtual bool		hitInterval(Ray& ray, double t_min, double t_max, double& t0, double& t1) const;
 		virtual bool		createBoundingBox(AABB& outputBoundingBox) const = 0;
 		virtual Material*	getMaterial(void) const = 0;

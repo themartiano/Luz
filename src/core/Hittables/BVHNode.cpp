@@ -379,6 +379,34 @@ bool	BVHNode::hitAny(Ray& ray, double t_min, double t_max) const
 	return (false);
 }
 
+Color BVHNode::shadowTransmittance(Ray& ray, double t_min, double t_max) const
+{
+	HitRecord boundingHitRecord;
+	if (
+		this->_childBoundingBoxes.size() != this->_childs.size()
+		|| !this->_boundingBox.hit(ray, boundingHitRecord, t_max)
+	)
+		return (Color(1.0, 1.0, 1.0));
+	if (RENDER_AABB)
+		return (Color(0.0, 0.0, 0.0));
+
+	Color transmittance(1.0, 1.0, 1.0);
+	for (std::size_t i = 0; i < this->_childs.size(); i++)
+	{
+		double childNear = 0.0;
+		if (!boxHitDistance(this->_childBoundingBoxes[i], ray, t_max, childNear))
+			continue;
+		transmittance = transmittance * this->_childs[i]->shadowTransmittance(ray, t_min, t_max);
+		if (
+			transmittance.getRed() <= 1e-8
+			&& transmittance.getGreen() <= 1e-8
+			&& transmittance.getBlue() <= 1e-8
+		)
+			return (Color(0.0, 0.0, 0.0));
+	}
+	return (transmittance);
+}
+
 // Sets 'outputBoundingBox' to the BVH Node's '_boundingBox'
 bool	BVHNode::createBoundingBox(AABB& outputBoundingBox) const
 {

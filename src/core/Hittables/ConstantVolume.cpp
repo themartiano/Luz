@@ -4,6 +4,7 @@
 #include "Defaults.hpp"
 #include "Utilities.hpp"
 #include "Sampler.hpp"
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -128,6 +129,23 @@ bool	ConstantVolume::hitAny(Ray& ray, double t_min, double t_max) const
 	double hitT;
 
 	return (this->sampleScatteringDistance(ray, t_min, t_max, hitT));
+}
+
+Color ConstantVolume::shadowTransmittance(Ray& ray, double t_min, double t_max) const
+{
+	double entryT;
+	double exitT;
+	if (!this->_boundary || !this->_boundary->hitInterval(ray, -T_MAX, T_MAX, entryT, exitT))
+		return (Color(1.0, 1.0, 1.0));
+	entryT = std::max(entryT, std::max(0.0, t_min));
+	exitT = std::min(exitT, t_max);
+	if (entryT >= exitT)
+		return (Color(1.0, 1.0, 1.0));
+	const double rayLength = Utilities::vectorLength(ray.getDirection());
+	if (!std::isfinite(rayLength) || rayLength <= 0.0)
+		return (Color(1.0, 1.0, 1.0));
+	const double value = std::exp(-this->_density * (exitT - entryT) * rayLength);
+	return (Color(value, value, value));
 }
 
 // Creates an AABB / bounding box for this ConstantVolume
