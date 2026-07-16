@@ -53,6 +53,10 @@ namespace
 			<< "  --adaptive [true|false]     Toggle adaptive sampling (default: true)\n"
 			<< "  --no-adaptive               Disable adaptive sampling\n"
 			<< "  --adaptive-min-samples N    Minimum samples before adaptive stopping\n"
+			<< "  --adaptive-background-min-samples N\n"
+			<< "                               Background floor (0 inherits adaptive minimum)\n"
+			<< "  --adaptive-volume-min-samples N\n"
+			<< "                               Volume floor (0 inherits adaptive minimum)\n"
 			<< "  --adaptive-threshold F      Relative adaptive noise threshold\n"
 			<< "  --adaptive-check-interval N Adaptive convergence check interval\n"
 			<< "  -mlb, --maxLightBounces N   Override maximum light bounces\n"
@@ -100,6 +104,8 @@ void	FlagsParser::parse(Scene& scene)
 	this->_parseSamples(scene);
 	this->_parseAdaptiveSampling(scene);
 	this->_parseAdaptiveMinSamples(scene);
+	this->_parseAdaptiveBackgroundMinSamples(scene);
+	this->_parseAdaptiveVolumeMinSamples(scene);
 	this->_parseAdaptiveThreshold(scene);
 	this->_parseAdaptiveCheckInterval(scene);
 	this->_parseMaxLightBounces(scene);
@@ -185,6 +191,8 @@ FlagsParser::_iterator	FlagsParser::_findPositionalFile(void)
 		"--benchmark-case",
 		"--samples", "-s",
 		"--adaptive-min-samples",
+		"--adaptive-background-min-samples",
+		"--adaptive-volume-min-samples",
 		"--adaptive-threshold",
 		"--adaptive-check-interval",
 		"--maxLightBounces", "--max-light-bounces", "-mlb",
@@ -373,6 +381,32 @@ void	FlagsParser::_parseAdaptiveMinSamples(Scene& scene)
 			throw std::runtime_error("--adaptive-min-samples requires a value.");
 		}
 		scene.setAdaptiveMinSamples(std::stoi(*(it + 1)));
+	}
+}
+
+void	FlagsParser::_parseAdaptiveBackgroundMinSamples(Scene& scene)
+{
+	auto it = this->_findFlag("--adaptive-background-min-samples");
+	if (it != this->_args.end())
+	{
+		if (it + 1 == this->_args.end())
+		{
+			throw std::runtime_error("--adaptive-background-min-samples requires a value.");
+		}
+		scene.setAdaptiveBackgroundMinSamples(std::stoi(*(it + 1)));
+	}
+}
+
+void	FlagsParser::_parseAdaptiveVolumeMinSamples(Scene& scene)
+{
+	auto it = this->_findFlag("--adaptive-volume-min-samples");
+	if (it != this->_args.end())
+	{
+		if (it + 1 == this->_args.end())
+		{
+			throw std::runtime_error("--adaptive-volume-min-samples requires a value.");
+		}
+		scene.setAdaptiveVolumeMinSamples(std::stoi(*(it + 1)));
 	}
 }
 

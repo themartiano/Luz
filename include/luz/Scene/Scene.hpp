@@ -8,10 +8,12 @@
 #include "Image.hpp"
 #include "Denoise/NFOR.hpp"
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 #include <memory>
 
 class	CausticPhotonMap;
+class	VolumeGuidingField;
 
 struct	SceneRenderStats
 {
@@ -22,7 +24,15 @@ struct	SceneRenderStats
 	double		renderMS = 0.0;
 	double		denoiseMS = 0.0;
 	double		postProcessMS = 0.0;
+	double		volumeGuideMS = 0.0;
 	double		totalMS = 0.0;
+	bool		displayDiagnosticsValid = false;
+	double		displayLuminanceP01 = 0.0;
+	double		displayLuminanceP50 = 0.0;
+	double		displayLuminanceP99 = 0.0;
+	double		displayNearBlackPixelFraction = 0.0;
+	double		displayNearWhitePixelFraction = 0.0;
+	double		displayClippedPixelFraction = 0.0;
 	bool		modelLoadProgressShown = false;
 };
 
@@ -39,6 +49,10 @@ class	Scene
 		void	setAdaptiveSampling(bool adaptiveSampling);
 		int		getAdaptiveMinSamples(void) const;
 		void	setAdaptiveMinSamples(int adaptiveMinSamples);
+		int		getAdaptiveBackgroundMinSamples(void) const;
+		void	setAdaptiveBackgroundMinSamples(int adaptiveBackgroundMinSamples);
+		int		getAdaptiveVolumeMinSamples(void) const;
+		void	setAdaptiveVolumeMinSamples(int adaptiveVolumeMinSamples);
 		int		getAdaptiveCheckInterval(void) const;
 		void	setAdaptiveCheckInterval(int adaptiveCheckInterval);
 		double	getAdaptiveThreshold(void) const;
@@ -50,6 +64,20 @@ class	Scene
 		double	getExposure(void) const;
 		void	setExposure(double exposure);
 		void	setPhotographicExposure(double fNumber, double shutterSeconds, double iso);
+		int		getVolumeGuidingTrainingSamples(void) const;
+		void	setVolumeGuidingTrainingSamples(int trainingSamples);
+		std::uint32_t	getVolumeGuidingResolution(void) const;
+		void	setVolumeGuidingResolution(std::uint32_t resolution);
+		std::uint32_t	getVolumeGuidingLobes(void) const;
+		void	setVolumeGuidingLobes(std::uint32_t lobes);
+		double	getVolumeGuidingAnisotropy(void) const;
+		void	setVolumeGuidingAnisotropy(double anisotropy);
+		double	getVolumeGuidingStrength(void) const;
+		void	setVolumeGuidingStrength(double strength);
+		int		getVolumeGuidingStartBounce(void) const;
+		void	setVolumeGuidingStartBounce(int startBounce);
+		void	setVolumeGuidingField(std::shared_ptr<VolumeGuidingField> field);
+		const std::shared_ptr<VolumeGuidingField>&	getVolumeGuidingField(void) const;
 		double	getContrast(void) const;
 		void	setContrast(double contrast);
 		bool	getCausticsEnabled(void) const;
@@ -139,9 +167,18 @@ class	Scene
 		int						_sampleCount;
 		bool					_adaptiveSampling;
 		int						_adaptiveMinSamples;
+		int						_adaptiveBackgroundMinSamples;
+		int						_adaptiveVolumeMinSamples;
 		int						_adaptiveCheckInterval;
 		double					_adaptiveThreshold;
 		int						_maxLightBounces;
+		int							_volumeGuidingTrainingSamples;
+		std::uint32_t				_volumeGuidingResolution;
+		std::uint32_t				_volumeGuidingLobes;
+		double						_volumeGuidingAnisotropy;
+		double						_volumeGuidingStrength;
+		int							_volumeGuidingStartBounce;
+		std::shared_ptr<VolumeGuidingField>	_volumeGuidingField;
 		ViewTransform			_viewTransform;
 			double					_exposure;
 			double					_contrast;

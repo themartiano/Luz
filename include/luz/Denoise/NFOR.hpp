@@ -26,7 +26,15 @@ namespace Denoise
 		std::size_t	height = 0;
 		std::vector<Color>	colorA;
 		std::vector<Color>	colorB;
+		// Low-variance analytic terms are composited after regression so their
+		// edges and high-frequency structure are never blurred by the denoiser.
+		std::vector<Color>	deterministicColor;
+		// Deterministic camera-ray opacity from the same primary cloud march. It
+		// keeps sub-threshold wisps in the volume reconstruction and separates
+		// thin vapor from opaque billows without another integration pass.
+		std::vector<double>	volumeOpacity;
 		std::vector<double>	colorVariance;
+		std::vector<unsigned int>	sampleCount;
 		std::vector<FeatureVector>	featuresA;
 		std::vector<FeatureVector>	featuresB;
 		std::vector<FeatureVector>	featureVariance;

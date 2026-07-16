@@ -59,6 +59,22 @@ bool	Renderer::render(Scene& scene)
 				<< CLR_GREEN << scene.getAdaptiveMinSamples() << CLR_BLUE << " min spp; "
 				<< CLR_GREEN << scene.getAdaptiveThreshold() << CLR_BLUE << " threshold;"
 				<< CLR_RESET << std::endl;
+			if (
+				scene.getAdaptiveBackgroundMinSamples() > 0
+				|| scene.getAdaptiveVolumeMinSamples() > 0
+			)
+			{
+				const int backgroundMinimum = scene.getAdaptiveBackgroundMinSamples() > 0
+					? scene.getAdaptiveBackgroundMinSamples()
+					: scene.getAdaptiveMinSamples();
+				const int volumeMinimum = scene.getAdaptiveVolumeMinSamples() > 0
+					? scene.getAdaptiveVolumeMinSamples()
+					: scene.getAdaptiveMinSamples();
+				std::cout
+					<< CLR_GREEN << backgroundMinimum << CLR_BLUE << " background min spp; "
+					<< CLR_GREEN << volumeMinimum << CLR_BLUE << " volume min spp;"
+					<< CLR_RESET << std::endl;
+			}
 		}
 		std::cout << CLR_GREEN << scene.getImage()->getWidth() << CLR_BLUE << " x " << CLR_GREEN << scene.getImage()->getHeight() << CLR_RESET << std::endl;
 	}
@@ -68,6 +84,7 @@ bool	Renderer::render(Scene& scene)
 	stats = scene.getRenderStats();
 	stats.totalMS = stats.modelLoadMS
 		+ stats.sceneBuildMS
+		+ stats.volumeGuideMS
 		+ stats.renderMS
 		+ stats.denoiseMS
 		+ stats.postProcessMS;
@@ -82,7 +99,24 @@ bool	Renderer::render(Scene& scene)
 			<< TerminalProgress::formatDuration(stats.totalMS)
 			<< CLR_BLUE_BRIGHT << ", Render " << CLR_WHITE
 			<< TerminalProgress::formatDuration(stats.renderMS);
+		if (stats.volumeGuideMS > 0.0)
+		{
+			std::cout
+				<< CLR_BLUE_BRIGHT << ", Guide training " << CLR_WHITE
+				<< TerminalProgress::formatDuration(stats.volumeGuideMS);
+		}
 		std::cout << CLR_RESET << "\n\n";
+		if (stats.displayDiagnosticsValid)
+		{
+			std::cout
+				<< CLR_GREEN_BRIGHT << "Display luminance p01 / p50 / p99: "
+				<< CLR_WHITE << stats.displayLuminanceP01 << " / "
+				<< stats.displayLuminanceP50 << " / "
+				<< stats.displayLuminanceP99
+				<< CLR_BLUE_BRIGHT << "; clipped pixels: "
+				<< CLR_WHITE << stats.displayClippedPixelFraction * 100.0 << "%"
+				<< CLR_RESET << "\n\n";
+		}
 	} else {
 		std::cout
 			<< "stats"
@@ -90,10 +124,18 @@ bool	Renderer::render(Scene& scene)
 			<< " avg_spp=" << stats.averageSamplesPerPixel
 			<< " model_load_ms=" << stats.modelLoadMS
 			<< " scene_build_ms=" << stats.sceneBuildMS
+			<< " volume_guide_ms=" << stats.volumeGuideMS
 			<< " render_ms=" << stats.renderMS
 			<< " denoise_ms=" << stats.denoiseMS
 			<< " postprocess_ms=" << stats.postProcessMS
 			<< " total_ms=" << stats.totalMS
+			<< " display_valid=" << stats.displayDiagnosticsValid
+			<< " display_p01=" << stats.displayLuminanceP01
+			<< " display_p50=" << stats.displayLuminanceP50
+			<< " display_p99=" << stats.displayLuminanceP99
+			<< " display_near_black=" << stats.displayNearBlackPixelFraction
+			<< " display_near_white=" << stats.displayNearWhitePixelFraction
+			<< " display_clipped=" << stats.displayClippedPixelFraction
 			<< std::endl;
 		std::cout << stats.totalMS << std::endl;
 	}

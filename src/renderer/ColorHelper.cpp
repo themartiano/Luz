@@ -6,6 +6,9 @@
 #include "SkyTypes.hpp"
 #include "Sampler.hpp"
 #include "ONB.hpp"
+#include "Hittables/DirectionalLight.hpp"
+#include "Hittables/DensityVolume.hpp"
+#include "VolumeGuidingField.hpp"
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -15,12 +18,36 @@
 namespace
 {
 	constexpr int		RUSSIAN_ROULETTE_START_BOUNCE = 3;
+	constexpr int		VOLUME_RUSSIAN_ROULETTE_START_BOUNCE = 8;
 	constexpr double	PATH_THROUGHPUT_EPSILON = 1e-6;
 	constexpr double	RUSSIAN_ROULETTE_MIN_SURVIVAL = 0.05;
 	constexpr double	RUSSIAN_ROULETTE_MAX_SURVIVAL = 0.95;
+	constexpr double	VOLUME_RUSSIAN_ROULETTE_MAX_SURVIVAL = 0.99;
 	constexpr int		DIRECT_LIGHT_FULL_SAMPLE_BOUNCES = 2;
+	constexpr int		VOLUME_DIRECT_LIGHT_FULL_SAMPLE_BOUNCES = 12;
 	constexpr double	DIRECT_LIGHT_LATE_SAMPLE_PROBABILITY = 0.5;
+	constexpr double	VOLUME_SUN_GUIDE_PROBABILITY = 0.25;
+	constexpr double	VOLUME_SKY_GUIDE_PROBABILITY = 0.25;
 	const double		FULL_SPHERE_PDF = 1.0 / (4.0 * D_PI);
+	const double		HEMISPHERE_PDF = 1.0 / (2.0 * D_PI);
+
+	double henyeyGreensteinPDF(double anisotropy, double cosTheta)
+	{
+		const double g = std::max(-0.99, std::min(0.99, anisotropy));
+		const double g2 = g * g;
+		const double denominator = std::max(1e-12, 1.0 + g2 - (2.0 * g * cosTheta));
+		return ((1.0 - g2) / (4.0 * D_PI * denominator * std::sqrt(denominator)));
+	}
+
+	double drainePDF(double anisotropy, double alpha, double cosTheta)
+	{
+		const double g = std::max(-0.99, std::min(0.99, anisotropy));
+		const double g2 = g * g;
+		const double denominator = std::max(1e-12, 1.0 + g2 - 2.0 * g * cosTheta);
+		const double normalization = 1.0 + alpha * (1.0 + 2.0 * g2) / 3.0;
+		return ((1.0 - g2) * (1.0 + alpha * cosTheta * cosTheta)
+			/ (4.0 * D_PI * normalization * denominator * std::sqrt(denominator)));
+	}
 
 	struct	LightDistribution
 	{
@@ -35,6 +62,33 @@ namespace
 		double	pdf = 0.0;
 		double	tMax = 0.0;
 		bool	valid = false;
+		bool	directional = false;
+	};
+
+	struct	ScatterDirectionSample
+	{
+		Vector3	direction;
+		double	physicalPDF = 0.0;
+		double	proposalPDF = 0.0;
+	};
+
+	class	ScopedDirectionalShadowSampling
+	{
+		public:
+			explicit ScopedDirectionalShadowSampling(bool enabled)
+				: _previous(Sampler::isDirectionalShadowSampling())
+			{
+				if (enabled)
+					Sampler::setDirectionalShadowSampling(true);
+			}
+
+			~ScopedDirectionalShadowSampling(void)
+			{
+				Sampler::setDirectionalShadowSampling(this->_previous);
+			}
+
+		private:
+			bool	_previous;
 	};
 
 	double	scatterPDFValue(
@@ -70,11 +124,21 @@ namespace
 				const Vector3 normalizedDirection = direction / std::sqrt(directionLengthSquared);
 				const Vector3 phaseDirection = scatterRecord.phaseDirection / std::sqrt(phaseDirectionLengthSquared);
 				const double cosTheta = std::max(-1.0, std::min(1.0, Utilities::dot(normalizedDirection, phaseDirection)));
-				const double g = std::max(-0.99, std::min(0.99, scatterRecord.phaseAnisotropy));
-				const double g2 = g * g;
-				const double denominator = std::max(1e-12, 1.0 + g2 - (2.0 * g * cosTheta));
-
-				return ((1.0 - g2) / (4.0 * D_PI * denominator * std::sqrt(denominator)));
+				const double primaryWeight = std::max(0.0, std::min(1.0, scatterRecord.phasePrimaryWeight));
+				if (scatterRecord.phaseUsesDraine)
+				{
+					const double draineWeight = std::clamp(scatterRecord.phaseDraineWeight, 0.0, 1.0);
+					return (
+						(1.0 - draineWeight) * henyeyGreensteinPDF(scatterRecord.phaseAnisotropy, cosTheta)
+						+ draineWeight * drainePDF(
+							scatterRecord.phaseSecondaryAnisotropy,
+							scatterRecord.phaseDraineAlpha,
+							cosTheta
+						)
+					);
+				}
+				return (primaryWeight * henyeyGreensteinPDF(scatterRecord.phaseAnisotropy, cosTheta)
+					+ (1.0 - primaryWeight) * henyeyGreensteinPDF(scatterRecord.phaseSecondaryAnisotropy, cosTheta));
 			}
 			case SCATTER_PDF_BSDF:
 				if (!scatterRecord.bsdfMaterial)
@@ -89,6 +153,27 @@ namespace
 			default:
 				return (0.0);
 		}
+	}
+
+	double scatterBaseProposalPDF(
+		const ScatterRecord& scatterRecord,
+		const HitRecord& hitRecord,
+		const Vector3& direction
+	)
+	{
+		if (scatterRecord.pdfType != SCATTER_PDF_HENYEY_GREENSTEIN || !scatterRecord.phaseUsesDraine)
+			return (scatterPDFValue(scatterRecord, hitRecord, direction));
+		const double directionLengthSquared = Utilities::vectorLengthSquared(direction);
+		const double phaseDirectionLengthSquared = Utilities::vectorLengthSquared(scatterRecord.phaseDirection);
+		if (directionLengthSquared <= 0.0 || phaseDirectionLengthSquared <= 0.0)
+			return (0.0);
+		const double cosTheta = std::clamp(Utilities::dot(
+			direction / std::sqrt(directionLengthSquared),
+			scatterRecord.phaseDirection / std::sqrt(phaseDirectionLengthSquared)
+		), -1.0, 1.0);
+		const double primaryWeight = std::clamp(scatterRecord.phasePrimaryWeight, 0.0, 1.0);
+		return (primaryWeight * henyeyGreensteinPDF(scatterRecord.phaseAnisotropy, cosTheta)
+			+ (1.0 - primaryWeight) * henyeyGreensteinPDF(scatterRecord.phaseSecondaryAnisotropy, cosTheta));
 	}
 
 	Color	scatterBSDFCos(
@@ -121,7 +206,11 @@ namespace
 		}
 
 		const Vector3 phaseDirection = scatterRecord.phaseDirection / std::sqrt(phaseDirectionLengthSquared);
-		const double g = std::max(-0.99, std::min(0.99, scatterRecord.phaseAnisotropy));
+		const double primaryWeight = std::max(0.0, std::min(1.0, scatterRecord.phasePrimaryWeight));
+		const double sampledAnisotropy = Sampler::sample1D(Sampler::DIM_MATERIAL_DECISION) < primaryWeight
+			? scatterRecord.phaseAnisotropy
+			: scatterRecord.phaseSecondaryAnisotropy;
+		const double g = std::max(-0.99, std::min(0.99, sampledAnisotropy));
 		const Sampler::Sample2D sample = Sampler::sample2D(Sampler::DIM_BSDF_DIRECTION);
 		const double phi = 2.0 * D_PI * sample.x;
 		double cosTheta;
@@ -162,6 +251,178 @@ namespace
 			default:
 				return (Vector3(0.0, 0.0, 0.0));
 		}
+	}
+
+	bool	primaryDirectionalGuide(
+		const std::vector<std::shared_ptr<Hittable>>& lights,
+		Vector3& guideDirection
+	)
+	{
+		const DirectionalLight* selectedLight = nullptr;
+		double selectedWeight = 0.0;
+
+		for (const std::shared_ptr<Hittable>& light : lights)
+		{
+			const DirectionalLight* directionalLight = dynamic_cast<const DirectionalLight*>(light.get());
+			if (!directionalLight)
+			{
+				continue;
+			}
+
+			const double weight = directionalLight->lightSelectionWeight();
+			if (!selectedLight || weight > selectedWeight)
+			{
+				selectedLight = directionalLight;
+				selectedWeight = weight;
+			}
+		}
+		if (!selectedLight)
+		{
+			return (false);
+		}
+
+		guideDirection = selectedLight->getDirection() * -1.0;
+		const double lengthSquared = Utilities::vectorLengthSquared(guideDirection);
+		if (lengthSquared <= 0.0 || !std::isfinite(lengthSquared))
+		{
+			return (false);
+		}
+		guideDirection = guideDirection / std::sqrt(lengthSquared);
+		return (true);
+	}
+
+	double	scatterProposalPDF(
+		const ScatterRecord& scatterRecord,
+		const HitRecord& hitRecord,
+		const Vector3& direction,
+		bool hasSunGuide,
+		const Vector3& sunGuideDirection,
+		bool hasSkyGuide,
+		const Vector3& skyGuideDirection,
+		const VolumeGuidingField* learnedGuide,
+		double learnedStrength
+	)
+	{
+		const double physicalPDF = scatterBaseProposalPDF(scatterRecord, hitRecord, direction);
+		const bool guidedVolume = scatterRecord.pdfType == SCATTER_PDF_HENYEY_GREENSTEIN
+			|| scatterRecord.pdfType == SCATTER_PDF_SPHERE;
+		if (!guidedVolume)
+		{
+			return (physicalPDF);
+		}
+
+		const bool analyticDirectionalGuides = scatterRecord.pdfType == SCATTER_PDF_HENYEY_GREENSTEIN;
+		const double sunWeight = analyticDirectionalGuides && hasSunGuide
+			? VOLUME_SUN_GUIDE_PROBABILITY : 0.0;
+		const double skyWeight = analyticDirectionalGuides && hasSkyGuide
+			? VOLUME_SKY_GUIDE_PROBABILITY : 0.0;
+		double proposalPDF = (1.0 - sunWeight - skyWeight) * physicalPDF;
+		if (hasSunGuide)
+		{
+			ScatterRecord sunRecord = scatterRecord;
+			sunRecord.phaseDirection = sunGuideDirection;
+			proposalPDF += sunWeight * scatterBaseProposalPDF(sunRecord, hitRecord, direction);
+		}
+		if (hasSkyGuide)
+		{
+			ScatterRecord skyRecord = scatterRecord;
+			skyRecord.phaseDirection = skyGuideDirection;
+			proposalPDF += skyWeight * scatterBaseProposalPDF(skyRecord, hitRecord, direction);
+		}
+		const bool hasLearnedGuide = learnedGuide != nullptr
+			&& learnedGuide->isFrozen()
+			&& learnedGuide->contains(hitRecord.position)
+			&& learnedStrength > 0.0;
+		if (hasLearnedGuide)
+		{
+			const double weight = std::clamp(learnedStrength, 0.0, 0.75);
+			proposalPDF = (1.0 - weight) * proposalPDF
+				+ weight * learnedGuide->pdf(hitRecord.position, direction);
+		}
+		return (proposalPDF);
+	}
+
+	ScatterDirectionSample	sampleScatterDirection(
+		const ScatterRecord& scatterRecord,
+		const HitRecord& hitRecord,
+		bool hasSunGuide,
+		const Vector3& sunGuideDirection,
+		bool hasSkyGuide,
+		const Vector3& skyGuideDirection,
+		const VolumeGuidingField* learnedGuide,
+		double learnedStrength
+	)
+	{
+		ScatterDirectionSample sample;
+
+		const bool guidedVolume = scatterRecord.pdfType == SCATTER_PDF_HENYEY_GREENSTEIN
+			|| scatterRecord.pdfType == SCATTER_PDF_SPHERE;
+		if (!guidedVolume)
+		{
+			sample.direction = scatterPDFGenerate(scatterRecord);
+			sample.physicalPDF = scatterPDFValue(scatterRecord, hitRecord, sample.direction);
+			sample.proposalPDF = scatterBaseProposalPDF(scatterRecord, hitRecord, sample.direction);
+			return (sample);
+		}
+
+		const bool hasLearnedGuide = learnedGuide != nullptr
+			&& learnedGuide->isFrozen()
+			&& learnedGuide->contains(hitRecord.position)
+			&& learnedStrength > 0.0;
+		const double learnedWeight = hasLearnedGuide
+			? std::clamp(learnedStrength, 0.0, 0.75)
+			: 0.0;
+		const bool analyticDirectionalGuides = scatterRecord.pdfType == SCATTER_PDF_HENYEY_GREENSTEIN;
+		const double sunWeight = analyticDirectionalGuides && hasSunGuide
+			? VOLUME_SUN_GUIDE_PROBABILITY : 0.0;
+		const double skyWeight = analyticDirectionalGuides && hasSkyGuide
+			? VOLUME_SKY_GUIDE_PROBABILITY : 0.0;
+		const double guideChoice = Sampler::sample1D(Sampler::DIM_VOLUME_GUIDING);
+		if (guideChoice < learnedWeight)
+		{
+			const VolumeGuidingField::Sample learnedSample = learnedGuide->sample(
+				hitRecord.position,
+				Sampler::sample1D(Sampler::DIM_VOLUME_LEARNED_LOBE),
+				Sampler::sample2D(Sampler::DIM_VOLUME_LEARNED_DIRECTION)
+			);
+			if (learnedSample.valid)
+				sample.direction = learnedSample.direction;
+			else
+				sample.direction = scatterPDFGenerate(scatterRecord);
+		}
+		else if (
+			(guideChoice - learnedWeight) / std::max(1e-12, 1.0 - learnedWeight)
+			< sunWeight
+		)
+		{
+			ScatterRecord sunRecord = scatterRecord;
+			sunRecord.phaseDirection = sunGuideDirection;
+			sample.direction = henyeyGreensteinDirection(sunRecord);
+		}
+		else if (
+			(guideChoice - learnedWeight) / std::max(1e-12, 1.0 - learnedWeight)
+			< sunWeight + skyWeight
+		)
+		{
+			ScatterRecord skyRecord = scatterRecord;
+			skyRecord.phaseDirection = skyGuideDirection;
+			sample.direction = henyeyGreensteinDirection(skyRecord);
+		}
+		else
+			sample.direction = scatterPDFGenerate(scatterRecord);
+		sample.physicalPDF = scatterPDFValue(scatterRecord, hitRecord, sample.direction);
+		sample.proposalPDF = scatterProposalPDF(
+			scatterRecord,
+			hitRecord,
+			sample.direction,
+			hasSunGuide,
+			sunGuideDirection,
+			hasSkyGuide,
+			skyGuideDirection,
+			learnedGuide,
+			learnedStrength
+		);
+		return (sample);
 	}
 
 	bool	hasWeightedLightDistribution(const LightDistribution& lightDistribution)
@@ -521,9 +782,18 @@ namespace
 		);
 	}
 
+	bool hasProceduralAtmosphereLight(Scene& scene)
+	{
+		return (scene.getRenderSky() == SKY_ATMOSPHERE && !hasEnvironmentLight(scene));
+	}
+
 	bool	hasSampledInfiniteLight(Scene& scene)
 	{
-		return (hasEnvironmentLight(scene) || hasConstantBackgroundLight(scene));
+		return (
+			hasEnvironmentLight(scene)
+			|| hasProceduralAtmosphereLight(scene)
+			|| hasConstantBackgroundLight(scene)
+		);
 	}
 
 	bool	supportsConstantBackgroundDirectLighting(const ScatterRecord& scatterRecord)
@@ -539,6 +809,7 @@ namespace
 	{
 		return (
 			((skyType == SKY_ENVIRONMENT || skyType == SKY_ATMOSPHERE) && hasEnvironmentLight(scene))
+			|| (skyType == SKY_ATMOSPHERE && hasProceduralAtmosphereLight(scene))
 			|| (
 				hasConstantBackgroundLight(scene)
 				&& supportsConstantBackgroundDirectLighting(scatterRecord)
@@ -592,6 +863,7 @@ namespace
 		const Atmosphere& atmosphere = scene.getAtmosphere();
 		const AtmosphereSample atmosphereSample = atmosphere.sampleSegment(ray, T_MAX);
 		Color background(0.0, 0.0, 0.0);
+		Color inScattering = atmosphereSample.inScattering;
 
 		if (hasVisibleEnvironment(scene))
 		{
@@ -599,9 +871,12 @@ namespace
 		}
 		else
 		{
+			// The procedural atmosphere is itself the sampled infinite light. Its
+			// continuation hit must therefore use the same MIS weight as NEE.
+			inScattering = inScattering * environmentMISWeight;
 			background = sampleProceduralStars(atmosphere, atmosphereSample.inScattering);
 		}
-		return (atmosphereSample.inScattering + (atmosphereSample.transmittance * background));
+		return (inScattering + (atmosphereSample.transmittance * background));
 	}
 
 	Color	sampleSceneSky(Scene& scene, Ray& ray)
@@ -658,11 +933,18 @@ namespace
 		throughput = clampRayColor(throughput * atmosphereSample.transmittance);
 	}
 
-	double	infiniteLightPDF(Scene& scene, const Vector3& direction)
+	double	infiniteLightPDF(Scene& scene, const Vector3& origin, const Vector3& direction)
 	{
 		if (hasEnvironmentLight(scene))
 		{
 			return (scene.getEnvironmentMap()->pdf(direction, scene.getEnvironmentRotation()));
+		}
+		if (hasProceduralAtmosphereLight(scene))
+		{
+			Vector3 up = Utilities::vectorLengthSquared(origin) > 1e-12
+				? Utilities::normalize(origin)
+				: Vector3(0.0, 1.0, 0.0);
+			return (Utilities::dot(up, direction) >= 0.0 ? HEMISPHERE_PDF : 0.0);
 		}
 		if (hasConstantBackgroundLight(scene))
 		{
@@ -671,9 +953,12 @@ namespace
 		return (0.0);
 	}
 
-	bool	applyRussianRoulette(Color& throughput, int bounces)
+	bool	applyRussianRoulette(Color& throughput, int bounces, bool highAlbedoVolume = false)
 	{
-		if (bounces < RUSSIAN_ROULETTE_START_BOUNCE)
+		const int startBounce = highAlbedoVolume
+			? VOLUME_RUSSIAN_ROULETTE_START_BOUNCE
+			: RUSSIAN_ROULETTE_START_BOUNCE;
+		if (bounces < startBounce)
 		{
 			return (true);
 		}
@@ -681,7 +966,10 @@ namespace
 		double survivalProbability = maxChannel(throughput);
 		survivalProbability = std::max(
 			RUSSIAN_ROULETTE_MIN_SURVIVAL,
-			std::min(RUSSIAN_ROULETTE_MAX_SURVIVAL, survivalProbability)
+			std::min(
+				highAlbedoVolume ? VOLUME_RUSSIAN_ROULETTE_MAX_SURVIVAL : RUSSIAN_ROULETTE_MAX_SURVIVAL,
+				survivalProbability
+			)
 		);
 		if (Sampler::sample1D(Sampler::DIM_RUSSIAN_ROULETTE) > survivalProbability)
 		{
@@ -781,35 +1069,46 @@ namespace
 			normal = Utilities::normalize(normal);
 		}
 		const Color albedo = hitRecord.material ? hitRecord.material->colorAt(hitRecord) : Color(0.0, 0.0, 0.0);
+		const MaterialType hitMaterialType = hitRecord.material ? hitRecord.material->getType() : LAMBERTIAN;
+		const bool volumeHit = hitMaterialType == HENYEY_GREENSTEIN || hitMaterialType == ISOTROPIC;
 		const double materialType = hitRecord.material
 			? static_cast<double>(hitRecord.material->getType()) / static_cast<double>(PRINCIPLED)
 			: 0.0;
+		const double featureDepth = volumeHit && hitRecord.t1 > 0.0 ? hitRecord.t1 : hitRecord.t0;
 
 		setPrimaryCoordinates(features, renderCamera, x, y);
 		features[2] = 1.0;
-		features[3] = hitRecord.t0 > 0.0 ? hitRecord.t0 / (1.0 + hitRecord.t0) : 0.0;
+		features[3] = featureDepth > 0.0
+			? (volumeHit
+				? std::min(1.0, std::log1p(featureDepth) / std::log(1000001.0))
+				: featureDepth / (1.0 + featureDepth))
+			: 0.0;
 		features[4] = normal.getX() * 0.5 + 0.5;
 		features[5] = normal.getY() * 0.5 + 0.5;
 		features[6] = normal.getZ() * 0.5 + 0.5;
-		features[7] = normalizedColorChannel(albedo.getRed());
+		features[7] = volumeHit ? std::clamp(hitRecord.u, 0.0, 1.0) : normalizedColorChannel(albedo.getRed());
 		features[8] = normalizedColorChannel(albedo.getGreen());
 		features[9] = normalizedColorChannel(albedo.getBlue());
 		features[10] = materialType;
 		return (features);
 	}
 
-	bool	isShadowOccluded(Scene& scene, Ray& shadowRay, double tMax)
+	Color shadowTransmittance(Scene& scene, Ray& shadowRay, double tMax)
 	{
 		if (tMax <= T_MIN)
-		{
-			return (false);
-		}
+			return (Color(1.0, 1.0, 1.0));
+		Color transmittance(1.0, 1.0, 1.0);
 
 		const auto& accelerationStructure = scene.getAccelerationStructure();
-
-		if (accelerationStructure && accelerationStructure->hitAny(shadowRay, T_MIN, tMax))
+		if (accelerationStructure)
 		{
-			return (true);
+			transmittance = transmittance * accelerationStructure->shadowTransmittance(
+				shadowRay,
+				T_MIN,
+				tMax
+			);
+			if (maxChannel(transmittance) <= 1e-8)
+				return (Color(0.0, 0.0, 0.0));
 		}
 
 		const auto& unacceleratedHittables = scene.getUnacceleratedHittables();
@@ -819,17 +1118,346 @@ namespace
 
 		for (const std::shared_ptr<Hittable>& hittable : hittables)
 		{
-			if (hittable->hitAny(shadowRay, T_MIN, tMax))
+			transmittance = transmittance * hittable->shadowTransmittance(shadowRay, T_MIN, tMax);
+			if (maxChannel(transmittance) <= 1e-8)
+				return (Color(0.0, 0.0, 0.0));
+		}
+		return (transmittance);
+	}
+
+	std::vector<const DensityVolume*> primaryDensityVolumes(Scene& scene)
+	{
+		std::vector<const DensityVolume*> volumes;
+		for (const std::shared_ptr<Hittable>& hittable : scene.getHittables())
+		{
+			const DensityVolume* volume = dynamic_cast<const DensityVolume*>(hittable.get());
+			if (volume)
+				volumes.push_back(volume);
+		}
+		return (volumes);
+	}
+
+	struct PrimaryCloudControl
+	{
+		Color radiance;
+		double opacity = 0.0;
+	};
+
+	PrimaryCloudControl primaryDirectionalCloudScattering(
+		Scene& scene,
+		const Ray& cameraRay,
+		const std::vector<const DensityVolume*>& clouds
+	)
+	{
+		if (clouds.empty())
+			return (PrimaryCloudControl());
+		std::vector<const DirectionalLight*> directionalLights;
+		for (const std::shared_ptr<Hittable>& light : scene.getLights())
+		{
+			const DirectionalLight* directional = dynamic_cast<const DirectionalLight*>(light.get());
+			if (directional && directional->getMaterial())
+				directionalLights.push_back(directional);
+		}
+		bool hasReconstructedMultipleScattering = false;
+		for (const DensityVolume* cloud : clouds)
+		{
+			if (
+				cloud->multipleScatteringFalloff() < 0.999
+				&& cloud->multipleScatteringCompensation() > 0.0
+			)
 			{
-				return (true);
+				hasReconstructedMultipleScattering = true;
+				break;
 			}
 		}
+		const bool hasDiffuseAtmosphere = hasReconstructedMultipleScattering
+			&& hasProceduralAtmosphereLight(scene);
+		double entryT = T_MAX;
+		double exitT = -T_MAX;
+		double minimumFeatureScale = T_MAX;
+		for (const DensityVolume* cloud : clouds)
+		{
+			double cloudEntry;
+			double cloudExit;
+			if (!cloud->integrationInterval(cameraRay, T_MIN, T_MAX, cloudEntry, cloudExit))
+				continue;
+			entryT = std::min(entryT, std::max(0.0, cloudEntry));
+			exitT = std::max(exitT, cloudExit);
+			minimumFeatureScale = std::min(
+				minimumFeatureScale,
+				cloud->volumeFeatureScale()
+			);
+		}
+		if (!(entryT < exitT) || !std::isfinite(entryT) || !std::isfinite(exitT))
+			return (PrimaryCloudControl());
+		const double rayLength = std::sqrt(Utilities::vectorLengthSquared(cameraRay.getDirection()));
+		if (rayLength <= 0.0 || !std::isfinite(rayLength))
+			return (PrimaryCloudControl());
+		const Vector3 cameraDirection = cameraRay.getDirection() / rayLength;
+		const double interval = exitT - entryT;
+		const double pathLength = interval * rayLength;
+		const int stepCount = std::clamp(
+			static_cast<int>(std::ceil(pathLength / std::max(1.0, minimumFeatureScale * 0.05))),
+			48,
+			1024
+		);
+		const double stepT = interval / static_cast<double>(stepCount);
+		const double stepDistance = stepT * rayLength;
+		const Vector3 skyDirection = Utilities::vectorLengthSquared(cameraRay.getOrigin()) > 1e-12
+			? Utilities::normalize(cameraRay.getOrigin())
+			: Vector3(0.0, 1.0, 0.0);
+		const Color diffuseSkyRadiance = hasDiffuseAtmosphere
+			? scene.getAtmosphere().sampleDiffuseSkyRadiance(cameraRay.getOrigin())
+			: Color(0.0, 0.0, 0.0);
+		Color result(0.0, 0.0, 0.0);
+		double cameraCloudTransmittance = 1.0;
 
-		return (false);
+		for (int step = 0; step < stepCount; step++)
+		{
+			const double sampleT = entryT + (static_cast<double>(step) + 0.5) * stepT;
+			const Vector3 position = cameraRay.pointAtRay(sampleT);
+			double totalExtinction = 0.0;
+			for (const DensityVolume* cloud : clouds)
+				totalExtinction += cloud->extinctionAt(position);
+			if (totalExtinction <= 0.0)
+				continue;
+
+			Color source(0.0, 0.0, 0.0);
+			for (const DirectionalLight* light : directionalLights)
+			{
+				Vector3 lightDirection = light->getDirection() * -1.0;
+				const double lightLengthSquared = Utilities::vectorLengthSquared(lightDirection);
+				if (lightLengthSquared <= 0.0 || !std::isfinite(lightLengthSquared))
+					continue;
+				lightDirection /= std::sqrt(lightLengthSquared);
+				Color scatteringCoefficient(0.0, 0.0, 0.0);
+				Color bulkScatteringCoefficient(0.0, 0.0, 0.0);
+				double falloffExtinctionSum = 0.0;
+				double compensationExtinctionSum = 0.0;
+				double bulkExtinctionSum = 0.0;
+				double directionalOpticalDepth = 0.0;
+				bool hasDirectionalOpticalDepth = false;
+				bool missingDirectionalOpticalDepth = false;
+				for (const DensityVolume* cloud : clouds)
+				{
+					const double cloudExtinction = cloud->extinctionAt(position);
+					scatteringCoefficient += cloud->singleScatteringCoefficientAt(
+						position,
+						cameraDirection,
+						lightDirection
+					);
+					bulkScatteringCoefficient += cloud->volumeAlbedo()
+						* cloudExtinction;
+					falloffExtinctionSum += cloudExtinction
+						* cloud->multipleScatteringFalloff();
+					compensationExtinctionSum += cloudExtinction
+						* cloud->multipleScatteringCompensation();
+					bulkExtinctionSum += cloudExtinction;
+					if (cloudExtinction > 0.0)
+					{
+						double cloudOpticalDepth = 0.0;
+						if (cloud->directionalOpticalDepth(
+							position,
+							lightDirection,
+							cloudOpticalDepth
+						))
+						{
+							directionalOpticalDepth += cloudOpticalDepth;
+							hasDirectionalOpticalDepth = true;
+						}
+						else
+							missingDirectionalOpticalDepth = true;
+					}
+				}
+				if (maxChannel(scatteringCoefficient) <= 0.0)
+					continue;
+				Ray shadowRay = Ray::fromNormalizedDirection(position, lightDirection);
+				Color lightTransmittance = shadowTransmittance(scene, shadowRay, T_MAX);
+				Color emitted = light->getMaterial()->emitted();
+				if (scene.getRenderSky() == SKY_ATMOSPHERE)
+				{
+					emitted = emitted * scene.getAtmosphere().sampleTransmittance(
+						shadowRay,
+						T_MAX
+					);
+				}
+				if (maxChannel(lightTransmittance) > 1e-8)
+					source += scatteringCoefficient * emitted * lightTransmittance;
+
+				// The depth-falloff mode deliberately removes high-order collision
+				// events. Reconstruct their low-frequency energy deterministically:
+				// after the first event the phase function rapidly isotropizes, while
+				// the effective directional optical depth falls with scattering order.
+				// A finite geometric series keeps this bounded and leaves falloff=1 as
+				// the fully path-traced, uncompensated mode.
+				if (bulkExtinctionSum > 0.0 && maxChannel(bulkScatteringCoefficient) > 0.0)
+				{
+					const double averageFalloff = std::clamp(
+						falloffExtinctionSum / bulkExtinctionSum,
+						0.0,
+						1.0
+					);
+					if (averageFalloff < 0.999)
+					{
+						const double averageAlbedo = std::clamp(
+							Utilities::luminance(bulkScatteringCoefficient)
+							/ bulkExtinctionSum,
+							0.0,
+							1.0
+						);
+						const double ratio = std::min(0.94, averageAlbedo * averageFalloff);
+						const double orderGain = ratio > 1e-6
+							? ratio * (1.0 - std::pow(ratio, 4.0)) / (1.0 - ratio)
+							: 0.0;
+						const double directVisibility = std::clamp(
+							Utilities::luminance(lightTransmittance),
+							0.0,
+							1.0
+						);
+						double diffuseVisibility = 0.12
+							+ 0.88 * std::pow(directVisibility, 0.20);
+						if (hasDirectionalOpticalDepth && !missingDirectionalOpticalDepth)
+						{
+							// Diffusion in a highly scattering medium attenuates with
+							// exp(-sqrt(3 * absorption) * opticalDepth), substantially
+							// slower than direct Beer-Lambert transport. Retaining the
+							// cached depth avoids collapsing every optically thick point
+							// to the same flat fill after direct transmittance underflows.
+							const double diffusionRate = std::clamp(
+								std::sqrt(std::max(0.0, 3.0 * (1.0 - averageAlbedo))),
+								0.05,
+								0.15
+							);
+							const double diffusionVisibility = std::exp(
+								-diffusionRate * directionalOpticalDepth
+							);
+							diffuseVisibility = 0.09 + 0.91 * std::max(
+								diffusionVisibility,
+								std::pow(directVisibility, 0.20)
+							);
+						}
+						constexpr double ISOTROPIC_PHASE = 0.07957747154594766788;
+						const double compensation = std::clamp(
+							compensationExtinctionSum / bulkExtinctionSum,
+							0.0,
+							2.0
+						);
+						source += bulkScatteringCoefficient * emitted
+							* (ISOTROPIC_PHASE * orderGain * diffuseVisibility * compensation);
+					}
+				}
+			}
+			if (hasDiffuseAtmosphere && maxChannel(diffuseSkyRadiance) > 0.0)
+			{
+				Color bulkScatteringCoefficient(0.0, 0.0, 0.0);
+				double bulkExtinctionSum = 0.0;
+				double falloffExtinctionSum = 0.0;
+				double compensationExtinctionSum = 0.0;
+				double skyOpticalDepth = 0.0;
+				bool hasSkyOpticalDepth = false;
+				bool missingSkyOpticalDepth = false;
+				for (const DensityVolume* cloud : clouds)
+				{
+					const double cloudExtinction = cloud->extinctionAt(position);
+					bulkScatteringCoefficient += cloud->volumeAlbedo() * cloudExtinction;
+					bulkExtinctionSum += cloudExtinction;
+					falloffExtinctionSum += cloudExtinction
+						* cloud->multipleScatteringFalloff();
+					compensationExtinctionSum += cloudExtinction
+						* cloud->multipleScatteringCompensation();
+					if (cloudExtinction > 0.0)
+					{
+						double cloudOpticalDepth = 0.0;
+						if (cloud->directionalOpticalDepth(
+							position,
+							skyDirection,
+							cloudOpticalDepth
+						))
+						{
+							skyOpticalDepth += cloudOpticalDepth;
+							hasSkyOpticalDepth = true;
+						}
+						else
+							missingSkyOpticalDepth = true;
+					}
+				}
+				if (bulkExtinctionSum > 0.0 && maxChannel(bulkScatteringCoefficient) > 0.0)
+				{
+					const double averageFalloff = std::clamp(
+						falloffExtinctionSum / bulkExtinctionSum,
+						0.0,
+						1.0
+					);
+					const double compensation = std::clamp(
+						compensationExtinctionSum / bulkExtinctionSum,
+						0.0,
+						2.0
+					);
+					if (averageFalloff < 0.999 && compensation > 0.0)
+					{
+						const double averageAlbedo = std::clamp(
+							Utilities::luminance(bulkScatteringCoefficient)
+							/ bulkExtinctionSum,
+							0.0,
+							1.0
+						);
+						const double ratio = std::min(0.94, averageAlbedo * averageFalloff);
+						const double orderGain = ratio > 1e-6
+							? ratio * (1.0 - std::pow(ratio, 4.0)) / (1.0 - ratio)
+							: 0.0;
+						double skyVisibility = 0.12;
+						if (hasSkyOpticalDepth && !missingSkyOpticalDepth)
+						{
+							const double diffusionRate = std::clamp(
+								std::sqrt(std::max(0.0, 3.0 * (1.0 - averageAlbedo))),
+								0.05,
+								0.15
+							);
+							skyVisibility = 0.09 + 0.91 * std::exp(
+								-diffusionRate * skyOpticalDepth
+							);
+						}
+						// For a uniform-hemisphere mean radiance, the isotropic phase
+						// integral is (1 / 4pi) * (2pi * mean) = 0.5 * mean.
+						source += bulkScatteringCoefficient * diffuseSkyRadiance
+							* (0.5 * orderGain * skyVisibility * compensation);
+					}
+				}
+			}
+			const double segmentExtinction = -std::expm1(
+				-totalExtinction * stepDistance
+			);
+			if (maxChannel(source) > 0.0)
+			{
+				Color cameraAtmosphereTransmittance(1.0, 1.0, 1.0);
+				if (scene.getRenderSky() == SKY_ATMOSPHERE)
+				{
+					const Ray atmosphereRay = Ray::fromNormalizedDirection(
+						cameraRay.getOrigin(),
+						cameraDirection
+					);
+					cameraAtmosphereTransmittance = scene.getAtmosphere().sampleTransmittance(
+						atmosphereRay,
+						sampleT * rayLength
+					);
+				}
+				const double integratedSegment = cameraCloudTransmittance
+					* segmentExtinction / totalExtinction;
+				result += source * cameraAtmosphereTransmittance * integratedSegment;
+			}
+			cameraCloudTransmittance *= 1.0 - segmentExtinction;
+			if (cameraCloudTransmittance <= 1e-7)
+				break;
+		}
+		PrimaryCloudControl control;
+		control.radiance = clampRayColor(result);
+		control.opacity = std::clamp(1.0 - cameraCloudTransmittance, 0.0, 1.0);
+		return (control);
 	}
 
 	LightSample	sampleConstantBackgroundLight(Scene& scene, const Vector3& origin)
 	{
+		(void)origin;
 		LightSample sample;
 
 		if (!hasConstantBackgroundLight(scene))
@@ -845,18 +1473,13 @@ namespace
 			return (sample);
 		}
 
-		Ray shadowRay = Ray::fromNormalizedDirection(origin, sample.direction);
-		if (isShadowOccluded(scene, shadowRay, T_MAX))
-		{
-			return (sample);
-		}
-
 		sample.valid = true;
 		return (sample);
 	}
 
 	LightSample	sampleEnvironmentLight(Scene& scene, const Vector3& origin)
 	{
+		(void)origin;
 		LightSample sample;
 
 		if (!hasEnvironmentLight(scene))
@@ -883,11 +1506,30 @@ namespace
 			return (sample);
 		}
 
-		Ray shadowRay = Ray::fromNormalizedDirection(origin, sample.direction);
-		if (isShadowOccluded(scene, shadowRay, T_MAX))
-		{
+		sample.valid = true;
+		return (sample);
+	}
+
+	LightSample sampleProceduralAtmosphereLight(Scene& scene, const Vector3& origin)
+	{
+		LightSample sample;
+		if (!hasProceduralAtmosphereLight(scene))
 			return (sample);
-		}
+
+		Vector3 up = Utilities::vectorLengthSquared(origin) > 1e-12
+			? Utilities::normalize(origin)
+			: Vector3(0.0, 1.0, 0.0);
+		const Sampler::Sample2D random = Sampler::sample2D(Sampler::DIM_ENVIRONMENT_POINT);
+		const double phi = 2.0 * D_PI * random.x;
+		const double z = random.y;
+		const double radius = std::sqrt(std::max(0.0, 1.0 - z * z));
+		sample.direction = ONB(up).local(radius * std::cos(phi), radius * std::sin(phi), z);
+		sample.pdf = HEMISPHERE_PDF;
+		sample.tMax = T_MAX;
+		Ray atmosphereRay = Ray::fromNormalizedDirection(origin, sample.direction);
+		sample.emitted = scene.getAtmosphere().sampleSegment(atmosphereRay, T_MAX).inScattering;
+		if (maxChannel(sample.emitted) <= 0.0)
+			return (sample);
 
 		sample.valid = true;
 		return (sample);
@@ -899,12 +1541,19 @@ namespace
 		{
 			return (sampleEnvironmentLight(scene, origin));
 		}
+		if (hasProceduralAtmosphereLight(scene))
+		{
+			return (sampleProceduralAtmosphereLight(scene, origin));
+		}
 		return (sampleConstantBackgroundLight(scene, origin));
 	}
 
-	double	directLightSampleProbability(int bounces)
+	double	directLightSampleProbability(int bounces, bool highAlbedoVolume)
 	{
-		if (bounces < DIRECT_LIGHT_FULL_SAMPLE_BOUNCES)
+		if (
+			bounces < DIRECT_LIGHT_FULL_SAMPLE_BOUNCES
+			|| (highAlbedoVolume && bounces < VOLUME_DIRECT_LIGHT_FULL_SAMPLE_BOUNCES)
+		)
 		{
 			return (1.0);
 		}
@@ -938,6 +1587,7 @@ namespace
 		}
 
 		sample.direction = surfaceSample.direction;
+		sample.directional = std::dynamic_pointer_cast<DirectionalLight>(lights[lightIndex]) != nullptr;
 		sample.pdf = surfaceSample.pdf * selectionProbability;
 		sample.tMax = surfaceSample.tMax;
 		if (
@@ -976,7 +1626,12 @@ namespace
 		const LightDistribution& lightDistribution,
 		HitRecord& hitRecord,
 		const ScatterRecord& scatterRecord,
-		int bounces
+		int bounces,
+		bool hasSunGuide,
+		const Vector3& sunGuideDirection,
+		bool hasSkyGuide,
+		const Vector3& skyGuideDirection,
+		bool replacePrimaryDirectionalScattering
 	)
 	{
 		if (lights.empty())
@@ -984,7 +1639,9 @@ namespace
 			return (Color(0.0, 0.0, 0.0));
 		}
 
-		const double sampleProbability = directLightSampleProbability(bounces);
+		const MaterialType materialType = hitRecord.material ? hitRecord.material->getType() : LAMBERTIAN;
+		const bool highAlbedoVolume = materialType == HENYEY_GREENSTEIN || materialType == ISOTROPIC;
+		const double sampleProbability = directLightSampleProbability(bounces, highAlbedoVolume);
 		if (sampleProbability <= 0.0)
 		{
 			return (Color(0.0, 0.0, 0.0));
@@ -1002,12 +1659,25 @@ namespace
 		{
 			return (Color(0.0, 0.0, 0.0));
 		}
+		if (replacePrimaryDirectionalScattering && bounces == 0 && lightSample.directional)
+			return (Color(0.0, 0.0, 0.0));
 		if (!leavesOpaqueGeometricSurface(hitRecord, lightSample.direction))
 		{
 			return (Color(0.0, 0.0, 0.0));
 		}
 
-		const double scatterSamplePDF = scatterPDFValue(scatterRecord, hitRecord, lightSample.direction);
+		const double scatterSamplePDF = scatterProposalPDF(
+			scatterRecord,
+			hitRecord,
+			lightSample.direction,
+			hasSunGuide,
+			sunGuideDirection,
+			hasSkyGuide,
+			skyGuideDirection,
+			scene.getVolumeGuidingField().get(),
+			bounces >= scene.getVolumeGuidingStartBounce()
+				? scene.getVolumeGuidingStrength() : 0.0
+		);
 		const Color bsdfCos = scatterBSDFCos(scatterRecord, hitRecord, lightSample.direction);
 		if (
 			scatterSamplePDF <= 0.0
@@ -1018,25 +1688,42 @@ namespace
 			return (Color(0.0, 0.0, 0.0));
 		}
 		Ray shadowRay = Ray::fromNormalizedDirection(hitRecord.position, lightSample.direction);
-		if (isShadowOccluded(scene, shadowRay, lightSample.tMax - T_MIN))
-		{
+		const ScopedDirectionalShadowSampling directionalShadowScope(lightSample.directional);
+		const Color visibility = shadowTransmittance(scene, shadowRay, lightSample.tMax - T_MIN);
+		if (maxChannel(visibility) <= 1e-8)
 			return (Color(0.0, 0.0, 0.0));
+
+		const double misWeight = lightSample.directional
+			? 1.0
+			: powerHeuristic(lightSample.pdf, scatterSamplePDF);
+
+		Color emitted = lightSample.emitted;
+		if (lightSample.directional && scene.getRenderSky() == SKY_ATMOSPHERE)
+		{
+			Ray atmosphereRay = Ray::fromNormalizedDirection(hitRecord.position, lightSample.direction);
+			emitted = emitted * scene.getAtmosphere().sampleTransmittance(atmosphereRay, T_MAX);
 		}
-
-		const double misWeight = powerHeuristic(lightSample.pdf, scatterSamplePDF);
-
-		return (
+		const Color contribution = (
 			bsdfCos
-			* lightSample.emitted
+			* emitted
+			* visibility
 			* (misWeight / (lightSample.pdf * sampleProbability))
 		);
+		const std::shared_ptr<VolumeGuidingField>& guide = scene.getVolumeGuidingField();
+		if (highAlbedoVolume && guide && !guide->isFrozen())
+			guide->record(hitRecord.position, lightSample.direction, Utilities::luminance(contribution));
+		return (contribution);
 	}
 
 	Color	estimateEnvironmentLighting(
 		Scene& scene,
 		HitRecord& hitRecord,
 		const ScatterRecord& scatterRecord,
-		int bounces
+		int bounces,
+		bool hasSunGuide,
+		const Vector3& sunGuideDirection,
+		bool hasSkyGuide,
+		const Vector3& skyGuideDirection
 	)
 	{
 		const bool constantBackgroundLight = hasConstantBackgroundLight(scene);
@@ -1049,7 +1736,9 @@ namespace
 			return (Color(0.0, 0.0, 0.0));
 		}
 
-		const double sampleProbability = directLightSampleProbability(bounces);
+		const MaterialType materialType = hitRecord.material ? hitRecord.material->getType() : LAMBERTIAN;
+		const bool highAlbedoVolume = materialType == HENYEY_GREENSTEIN || materialType == ISOTROPIC;
+		const double sampleProbability = directLightSampleProbability(bounces, highAlbedoVolume);
 		if (sampleProbability <= 0.0)
 		{
 			return (Color(0.0, 0.0, 0.0));
@@ -1072,7 +1761,18 @@ namespace
 			return (Color(0.0, 0.0, 0.0));
 		}
 
-		const double scatterSamplePDF = scatterPDFValue(scatterRecord, hitRecord, lightSample.direction);
+		const double scatterSamplePDF = scatterProposalPDF(
+			scatterRecord,
+			hitRecord,
+			lightSample.direction,
+			hasSunGuide,
+			sunGuideDirection,
+			hasSkyGuide,
+			skyGuideDirection,
+			scene.getVolumeGuidingField().get(),
+			bounces >= scene.getVolumeGuidingStartBounce()
+				? scene.getVolumeGuidingStrength() : 0.0
+		);
 		const Color bsdfCos = scatterBSDFCos(scatterRecord, hitRecord, lightSample.direction);
 		if (
 			scatterSamplePDF <= 0.0
@@ -1084,16 +1784,24 @@ namespace
 		}
 
 		const double misWeight = powerHeuristic(lightSample.pdf, scatterSamplePDF);
+		Ray shadowRay = Ray::fromNormalizedDirection(hitRecord.position, lightSample.direction);
+		const Color visibility = shadowTransmittance(scene, shadowRay, lightSample.tMax - T_MIN);
+		if (maxChannel(visibility) <= 1e-8)
+			return (Color(0.0, 0.0, 0.0));
 
 		Color contribution = (
 			bsdfCos
 			* lightSample.emitted
+			* visibility
 			* (misWeight / (lightSample.pdf * sampleProbability))
 		);
 		if (constantBackgroundLight)
 		{
 			contribution = clampConstantBackgroundMiss(scene, contribution);
 		}
+		const std::shared_ptr<VolumeGuidingField>& guide = scene.getVolumeGuidingField();
+		if (highAlbedoVolume && guide && !guide->isFrozen())
+			guide->record(hitRecord.position, lightSample.direction, Utilities::luminance(contribution));
 		return (contribution);
 	}
 
@@ -1103,7 +1811,8 @@ namespace
 		Denoise::FeatureVector* primaryFeatures,
 		const Renderer::internal::RenderCamera* renderCamera,
 		std::size_t x,
-		std::size_t y
+		std::size_t y,
+		bool replacePrimaryDirectionalScattering
 	);
 }
 
@@ -1111,24 +1820,66 @@ Color	Renderer::internal::_calculatePixelColor(Scene& scene, const RenderCamera&
 {
 	Ray	ray = internal::_generateRay(renderCamera, x, y);
 
-	return(
-		internal::_calculateLightRaysColor(ray, scene)
-	);
+	return (calculateLightRaysColor(ray, scene, nullptr, nullptr, x, y, true));
 }
 
-Renderer::internal::RenderSample	Renderer::internal::_calculatePixelSample(Scene& scene, const RenderCamera& renderCamera, std::size_t x, std::size_t y)
+Renderer::internal::RenderSample	Renderer::internal::_calculatePixelSample(
+	Scene& scene,
+	const RenderCamera& renderCamera,
+	std::size_t x,
+	std::size_t y,
+	bool calculatePrimarySingleScattering
+)
 {
+	Sampler::setFeatureSampling(true);
 	Ray	ray = internal::_generateRay(renderCamera, x, y);
 	RenderSample sample;
-
-	sample.color = calculateLightRaysColor(ray, scene, &sample.features, &renderCamera, x, y);
+	Ray featureRay = ray;
+	HitRecord featureHit;
+	if (Renderer::internal::_checkHits(scene, featureRay, featureHit))
+	{
+		sample.features = primaryHitFeatures(featureHit, renderCamera, x, y);
+		const MaterialType materialType = featureHit.material
+			? featureHit.material->getType()
+			: LAMBERTIAN;
+		sample.primaryClass = (
+			materialType == HENYEY_GREENSTEIN || materialType == ISOTROPIC
+		)
+			? PrimaryRayClass::Volume
+			: PrimaryRayClass::Surface;
+	}
+	else
+	{
+		sample.features = primaryMissFeatures(scene, renderCamera, featureRay, x, y);
+		sample.primaryClass = PrimaryRayClass::Background;
+	}
+	Sampler::setFeatureSampling(false);
+	if (calculatePrimarySingleScattering)
+	{
+		Sampler::setVolumeControlSampling(true);
+		const PrimaryCloudControl control = primaryDirectionalCloudScattering(
+			scene,
+			ray,
+			primaryDensityVolumes(scene)
+		);
+		sample.primarySingleScattering = control.radiance;
+		sample.primaryVolumeOpacity = control.opacity;
+		if (control.opacity > 1e-5)
+		{
+			sample.primaryClass = PrimaryRayClass::Volume;
+		}
+		Sampler::setVolumeControlSampling(false);
+	}
+	else
+		sample.primarySingleScattering = Color(0.0, 0.0, 0.0);
+	sample.color = calculateLightRaysColor(ray, scene, nullptr, nullptr, x, y, true);
 	return (sample);
 }
 
 // Properly calculates light rays bounces, reflections, refractions, intersection, etc and returns the resulting color
 Color	Renderer::internal::_calculateLightRaysColor(const Ray& ray, Scene& scene)
 {
-	return (calculateLightRaysColor(ray, scene, nullptr, nullptr, 0, 0));
+	return (calculateLightRaysColor(ray, scene, nullptr, nullptr, 0, 0, false));
 }
 
 namespace
@@ -1139,19 +1890,28 @@ namespace
 		Denoise::FeatureVector* primaryFeatures,
 		const Renderer::internal::RenderCamera* renderCamera,
 		std::size_t x,
-		std::size_t y
+		std::size_t y,
+		bool replacePrimaryDirectionalScattering
 	)
 	{
 		const int		maxLightBounces = scene.getMaxLightBounces();
 		const auto		skyType = scene.getRenderSky();
 		const auto&		lights = scene.getLights();
 		const auto		lightCount = lights.size();
+		Vector3		volumeGuideDirection;
+		const bool		hasVolumeGuide = primaryDirectionalGuide(lights, volumeGuideDirection);
 		const bool		sampledInfiniteLight = hasSampledInfiniteLight(scene);
 		const LightDistribution lightDistribution = {
 			&scene.getLightSelectionCumulativeWeights(),
 			scene.getLightSelectionTotalWeight()
 		};
 		const CausticPhotonMap* causticPhotonMap = scene.getCausticPhotonMap().get();
+		std::vector<const Material*> primaryCloudMaterials;
+		for (const std::shared_ptr<Hittable>& hittable : scene.getHittables())
+		{
+			if (dynamic_cast<const DensityVolume*>(hittable.get()))
+				primaryCloudMaterials.push_back(hittable->getMaterial());
+		}
 		//static bool		distanceBlueness = scene.getDistanceBlueness();
 
 		Ray		currentRay = ray;
@@ -1161,6 +1921,13 @@ namespace
 			Vector3	previousScatterOrigin;
 			double	previousScatterPDF = 0.0;
 			bool	previousScatterSampledVisibleInfiniteLight = false;
+		VolumeGuidingField* trainingGuide = scene.getVolumeGuidingField()
+			&& !scene.getVolumeGuidingField()->isFrozen()
+			? scene.getVolumeGuidingField().get()
+			: nullptr;
+		bool pendingVolumeTraining = false;
+		Vector3 pendingVolumePosition;
+		Vector3 pendingVolumeDirection;
 
 		for (int bounces = 0; bounces <= maxLightBounces; bounces++)
 		{
@@ -1181,7 +1948,7 @@ namespace
 				{
 					environmentMISWeight = powerHeuristic(
 						previousScatterPDF,
-						infiniteLightPDF(scene, currentRay.getDirection())
+						infiniteLightPDF(scene, previousScatterOrigin, currentRay.getDirection())
 					);
 				}
 				Color skyColor(0.0, 0.0, 0.0);
@@ -1202,6 +1969,14 @@ namespace
 				}
 
 				Color skyContribution = throughput * skyColor;
+				if (trainingGuide && pendingVolumeTraining)
+				{
+					trainingGuide->record(
+						pendingVolumePosition,
+						pendingVolumeDirection,
+						Utilities::luminance(skyColor)
+					);
+				}
 				if (bounces > 0 && hasConstantBackgroundLight(scene))
 				{
 					skyContribution = clampConstantBackgroundMiss(scene, skyContribution);
@@ -1226,6 +2001,14 @@ namespace
 
 			if (!hitRecord.material->scatter(currentRay, hitRecord, scatterRecord))
 			{
+				if (trainingGuide && pendingVolumeTraining)
+				{
+					trainingGuide->record(
+						pendingVolumePosition,
+						pendingVolumeDirection,
+						Utilities::luminance(emitted)
+					);
+				}
 				const double previousLightPDF = (!previousBounceSpecular && lightCount > 0)
 					? lightPDFValue(lightDistribution, lights, previousScatterOrigin, currentRay.getDirection())
 					: 0.0;
@@ -1256,65 +2039,125 @@ namespace
 			}
 
 			accumulatedColor += throughput * emitted;
+			Color localRadiance = emitted;
 			if (isTerminatedThroughput(throughput * attenuation))
 			{
 				return (accumulatedColor);
 			}
 			if (causticPhotonMap)
 			{
-				accumulatedColor += clampRayColor(
-					throughput * causticPhotonMap->estimate(hitRecord, scatterRecord)
-				);
+				const Color causticRadiance = causticPhotonMap->estimate(hitRecord, scatterRecord);
+				accumulatedColor += clampRayColor(throughput * causticRadiance);
+				localRadiance += causticRadiance;
 			}
+			Vector3 volumeSkyGuideDirection;
+			const double skyGuideLengthSquared = Utilities::vectorLengthSquared(hitRecord.position);
+			const bool hasVolumeSkyGuide = skyType == SKY_ATMOSPHERE
+				&& skyGuideLengthSquared > 1e-12
+				&& std::isfinite(skyGuideLengthSquared);
+			if (hasVolumeSkyGuide)
+				volumeSkyGuideDirection = hitRecord.position / std::sqrt(skyGuideLengthSquared);
 
 			if (lightCount > 0)
 			{
-				accumulatedColor += clampRayColor(
-					throughput * estimateDirectLighting(
+				const bool replaceThisCloudEvent = replacePrimaryDirectionalScattering
+					&& bounces == 0
+					&& std::find(
+						primaryCloudMaterials.begin(),
+						primaryCloudMaterials.end(),
+						hitRecord.material
+					) != primaryCloudMaterials.end();
+				const Color directRadiance = estimateDirectLighting(
 						scene,
 						lights,
 						lightDistribution,
 						hitRecord,
 						scatterRecord,
-						bounces
-					)
-				);
+						bounces,
+						hasVolumeGuide,
+						volumeGuideDirection,
+						hasVolumeSkyGuide,
+						volumeSkyGuideDirection,
+							replaceThisCloudEvent
+						);
+				accumulatedColor += clampRayColor(throughput * directRadiance);
+				localRadiance += directRadiance;
 			}
 			if (sampledInfiniteLight)
 			{
-				accumulatedColor += clampRayColor(
-					throughput * estimateEnvironmentLighting(
+				const Color environmentRadiance = estimateEnvironmentLighting(
 						scene,
 						hitRecord,
 						scatterRecord,
-						bounces
-					)
+						bounces,
+						hasVolumeGuide,
+						volumeGuideDirection,
+						hasVolumeSkyGuide,
+							volumeSkyGuideDirection
+						);
+				accumulatedColor += clampRayColor(throughput * environmentRadiance);
+				localRadiance += environmentRadiance;
+			}
+			if (trainingGuide && pendingVolumeTraining)
+			{
+				trainingGuide->record(
+					pendingVolumePosition,
+					pendingVolumeDirection,
+					Utilities::luminance(localRadiance)
 				);
+				pendingVolumeTraining = false;
 			}
 
-			Ray scattered = Ray::fromNormalizedDirection(hitRecord.position, scatterPDFGenerate(scatterRecord));
+			const ScatterDirectionSample directionSample = sampleScatterDirection(
+				scatterRecord,
+				hitRecord,
+				hasVolumeGuide,
+				volumeGuideDirection,
+				hasVolumeSkyGuide,
+				volumeSkyGuideDirection,
+				scene.getVolumeGuidingField().get(),
+				bounces >= scene.getVolumeGuidingStartBounce()
+					? scene.getVolumeGuidingStrength() : 0.0
+			);
+			Ray scattered = Ray::fromNormalizedDirection(hitRecord.position, directionSample.direction);
 			if (!leavesOpaqueGeometricSurface(hitRecord, scattered.getDirection()))
 			{
 				return (accumulatedColor);
 			}
-			const double pdfValue = scatterPDFValue(scatterRecord, hitRecord, scattered.getDirection());
-
-			if (pdfValue <= 0.0 || !std::isfinite(pdfValue))
+			if (
+				directionSample.physicalPDF <= 0.0
+				|| directionSample.proposalPDF <= 0.0
+				|| !std::isfinite(directionSample.physicalPDF)
+				|| !std::isfinite(directionSample.proposalPDF)
+			)
 			{
 				return (accumulatedColor);
 			}
 
 			throughput = clampRayColor(
-				throughput * attenuation
+				throughput
+				* attenuation
+				* (directionSample.physicalPDF / directionSample.proposalPDF)
 			);
-			if (isTerminatedThroughput(throughput) || !applyRussianRoulette(throughput, bounces))
+			const MaterialType materialType = hitRecord.material->getType();
+			const bool highAlbedoVolume = materialType == HENYEY_GREENSTEIN || materialType == ISOTROPIC;
+			if (trainingGuide && highAlbedoVolume)
+			{
+				pendingVolumeTraining = true;
+				pendingVolumePosition = hitRecord.position;
+				pendingVolumeDirection = directionSample.direction;
+			}
+			if (
+				isTerminatedThroughput(throughput)
+				|| !applyRussianRoulette(throughput, bounces, highAlbedoVolume)
+			)
 			{
 				return (accumulatedColor);
 			}
 			currentRay = scattered;
 			previousBounceSpecular = false;
 			previousScatterOrigin = hitRecord.position;
-			previousScatterPDF = pdfValue;
+			previousScatterPDF = directionSample.proposalPDF;
 			previousScatterSampledVisibleInfiniteLight = samplesVisibleInfiniteLightForScatter(
 				scene,
 				skyType,

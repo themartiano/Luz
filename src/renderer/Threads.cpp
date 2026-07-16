@@ -6,8 +6,11 @@
 #include "TerminalProgress.hpp"
 #include "Blur/Gaussian.hpp"
 #include "Denoise/NFOR.hpp"
+#include "ColorManagement.hpp"
 #include "Random.hpp"
 #include "Sampler.hpp"
+#include "VolumeGuidingField.hpp"
+#include "Hittables/DensityVolume.hpp"
 #include <thread>
 #include <future>
 #include <vector>
@@ -18,10 +21,221 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <array>
+#include <stdexcept>
 
 namespace
 {
+	using PrimaryRayClass = Renderer::internal::PrimaryRayClass;
+
+	constexpr unsigned int DENOISE_GUIDE_SAMPLE_COUNT = 4;
+	constexpr unsigned int PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT = 2;
+	constexpr std::uint32_t VOLUME_GUIDING_STREAM = 0x47554944u;
+
+	double	radicalInverse(std::uint64_t index, std::uint32_t base)
+	{
+		double inverseBase = 1.0 / static_cast<double>(base);
+		double place = inverseBase;
+		double result = 0.0;
+		while (index > 0)
+		{
+			result += static_cast<double>(index % base) * place;
+			index /= base;
+			place *= inverseBase;
+		}
+		return (result);
+	}
+
+	bool	volumeGuidingBounds(const Scene& scene, Vector3& minimum, Vector3& maximum)
+	{
+		bool found = false;
+		for (const std::shared_ptr<Hittable>& hittable : scene.getHittables())
+		{
+			if (!hittable)
+				continue;
+			const Material* material = hittable->getMaterial();
+			const bool volumePhase = material != nullptr
+				&& (material->getType() == HENYEY_GREENSTEIN || material->getType() == ISOTROPIC);
+			if (dynamic_cast<const DensityVolume*>(hittable.get()) == nullptr && !volumePhase)
+				continue;
+			AABB bounds;
+			if (!hittable->createBoundingBox(bounds))
+				continue;
+			if (!found)
+			{
+				minimum = bounds.getMinimum();
+				maximum = bounds.getMaximum();
+				found = true;
+				continue;
+			}
+			minimum = Vector3(
+				std::min(minimum.getX(), bounds.getMinimum().getX()),
+				std::min(minimum.getY(), bounds.getMinimum().getY()),
+				std::min(minimum.getZ(), bounds.getMinimum().getZ())
+			);
+			maximum = Vector3(
+				std::max(maximum.getX(), bounds.getMaximum().getX()),
+				std::max(maximum.getY(), bounds.getMaximum().getY()),
+				std::max(maximum.getZ(), bounds.getMaximum().getZ())
+			);
+		}
+		return (found);
+	}
+
+	void	trainVolumeGuide(
+		Scene& scene,
+		const Renderer::internal::RenderCamera& renderCamera,
+		std::size_t width,
+		std::size_t height,
+		std::size_t threadCount
+	)
+	{
+		const int configuredSamples = scene.getVolumeGuidingTrainingSamples();
+		scene.setVolumeGuidingField(nullptr);
+		if (configuredSamples <= 0 || scene.getVolumeGuidingStrength() <= 0.0 || width == 0 || height == 0)
+			return;
+
+		Vector3 minimum;
+		Vector3 maximum;
+		if (!volumeGuidingBounds(scene, minimum, maximum))
+			return;
+		constexpr std::size_t MAX_GUIDE_BYTES = 512ull * 1024ull * 1024ull;
+		const std::size_t resolution = scene.getVolumeGuidingResolution();
+		const std::size_t lobes = scene.getVolumeGuidingLobes();
+		const std::size_t estimatedBytes = resolution * resolution * resolution * lobes
+			* (sizeof(std::atomic<std::uint64_t>) + sizeof(double))
+			+ lobes * sizeof(Vector3);
+		if (estimatedBytes > MAX_GUIDE_BYTES)
+			throw std::runtime_error("Volume guiding field exceeds the 512 MiB safety limit.");
+		auto guide = std::make_shared<VolumeGuidingField>(
+			minimum,
+			maximum,
+			scene.getVolumeGuidingResolution(),
+			scene.getVolumeGuidingLobes(),
+			scene.getVolumeGuidingAnisotropy()
+		);
+		scene.setVolumeGuidingField(guide);
+
+		const std::size_t trainingSamples = static_cast<std::size_t>(configuredSamples);
+		std::atomic<std::size_t> nextSample(0);
+		std::vector<std::future<void>> workers;
+		workers.reserve(threadCount);
+		for (std::size_t thread = 0; thread < threadCount; thread++)
+		{
+			workers.push_back(std::async(std::launch::async, [&]() {
+				while (true)
+				{
+					const std::size_t index = nextSample.fetch_add(1, std::memory_order_relaxed);
+					if (index >= trainingSamples)
+						break;
+					const std::uint64_t sequenceIndex = static_cast<std::uint64_t>(index) + 1ull;
+					const std::size_t x = std::min(
+						width - 1,
+						static_cast<std::size_t>(radicalInverse(sequenceIndex, 2) * static_cast<double>(width))
+					);
+					const std::size_t y = std::min(
+						height - 1,
+						static_cast<std::size_t>(radicalInverse(sequenceIndex, 3) * static_cast<double>(height))
+					);
+					Sampler::beginPixelSample(
+						x,
+						y,
+						static_cast<std::uint32_t>(index),
+						VOLUME_GUIDING_STREAM
+					);
+					(void)Renderer::internal::_calculatePixelColor(scene, renderCamera, x, y);
+					Sampler::endPixelSample();
+				}
+			}));
+		}
+		for (std::future<void>& worker : workers)
+			worker.get();
+		guide->freeze();
+	}
+
 	double	sampleLuminance(Color color);
+
+	void	computeDisplayDiagnostics(const Image& image, SceneRenderStats& stats)
+	{
+		constexpr std::size_t HISTOGRAM_BINS = 1024;
+		constexpr double NEAR_BLACK = 0.01;
+		constexpr double NEAR_WHITE = 0.98;
+		constexpr double CLIPPED = 1.0 - 1e-9;
+
+		stats.displayDiagnosticsValid = false;
+		stats.displayLuminanceP01 = 0.0;
+		stats.displayLuminanceP50 = 0.0;
+		stats.displayLuminanceP99 = 0.0;
+		stats.displayNearBlackPixelFraction = 0.0;
+		stats.displayNearWhitePixelFraction = 0.0;
+		stats.displayClippedPixelFraction = 0.0;
+		if (image.getColorEncoding() != ImageColorEncoding::DisplayEncodedSRGB)
+		{
+			return;
+		}
+
+		const std::size_t pixelCount = image.getWidth() * image.getHeight();
+		if (pixelCount == 0)
+		{
+			return;
+		}
+
+		std::array<std::size_t, HISTOGRAM_BINS> histogram{};
+		std::size_t nearBlackCount = 0;
+		std::size_t nearWhiteCount = 0;
+		std::size_t clippedCount = 0;
+		for (std::size_t index = 0; index < pixelCount; index++)
+		{
+			const Color pixel = image.pixels()[index];
+			const double luminance = std::clamp(
+				0.2126 * pixel.getRed()
+					+ 0.7152 * pixel.getGreen()
+					+ 0.0722 * pixel.getBlue(),
+				0.0,
+				1.0
+			);
+			const std::size_t bin = std::min(
+				HISTOGRAM_BINS - 1,
+				static_cast<std::size_t>(luminance * static_cast<double>(HISTOGRAM_BINS - 1))
+			);
+			histogram[bin]++;
+			nearBlackCount += luminance < NEAR_BLACK;
+			nearWhiteCount += luminance > NEAR_WHITE;
+			clippedCount += (
+				pixel.getRed() >= CLIPPED
+				|| pixel.getGreen() >= CLIPPED
+				|| pixel.getBlue() >= CLIPPED
+			);
+		}
+
+		auto percentile = [&histogram, pixelCount](double fraction) {
+			const std::size_t target = std::min(
+				pixelCount - 1,
+				static_cast<std::size_t>(fraction * static_cast<double>(pixelCount - 1))
+			);
+			std::size_t cumulative = 0;
+			for (std::size_t bin = 0; bin < HISTOGRAM_BINS; bin++)
+			{
+				cumulative += histogram[bin];
+				if (cumulative > target)
+				{
+					return (static_cast<double>(bin) / static_cast<double>(HISTOGRAM_BINS - 1));
+				}
+			}
+			return (1.0);
+		};
+
+		stats.displayDiagnosticsValid = true;
+		stats.displayLuminanceP01 = percentile(0.01);
+		stats.displayLuminanceP50 = percentile(0.50);
+		stats.displayLuminanceP99 = percentile(0.99);
+		stats.displayNearBlackPixelFraction = static_cast<double>(nearBlackCount)
+			/ static_cast<double>(pixelCount);
+		stats.displayNearWhitePixelFraction = static_cast<double>(nearWhiteCount)
+			/ static_cast<double>(pixelCount);
+		stats.displayClippedPixelFraction = static_cast<double>(clippedCount)
+			/ static_cast<double>(pixelCount);
+	}
 
 	struct	DenoiseHalfAccumulator
 	{
@@ -171,12 +385,48 @@ namespace
 		return (confidenceInterval <= target);
 	}
 
-	unsigned int	darkMinimumSamples(const Scene& scene)
+	PrimaryRayClass	mergePrimaryRayClass(PrimaryRayClass current, PrimaryRayClass sample)
+	{
+		return (
+			static_cast<int>(sample) > static_cast<int>(current)
+				? sample
+				: current
+		);
+	}
+
+	unsigned int	adaptiveMinimumSamples(const Scene& scene, PrimaryRayClass primaryClass)
+	{
+		int configuredMinimum = scene.getAdaptiveMinSamples();
+
+		if (
+			primaryClass == PrimaryRayClass::Background
+			&& scene.getAdaptiveBackgroundMinSamples() > 0
+		)
+		{
+			configuredMinimum = scene.getAdaptiveBackgroundMinSamples();
+		}
+		else if (
+			primaryClass == PrimaryRayClass::Volume
+			&& scene.getAdaptiveVolumeMinSamples() > 0
+		)
+		{
+			configuredMinimum = scene.getAdaptiveVolumeMinSamples();
+		}
+		if (primaryClass == PrimaryRayClass::Background)
+		{
+			configuredMinimum = std::max(
+				configuredMinimum,
+				static_cast<int>(PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT)
+			);
+		}
+		return (static_cast<unsigned int>(
+			std::min(configuredMinimum, scene.getSampleCount())
+		));
+	}
+
+	unsigned int	darkMinimumSamples(const Scene& scene, unsigned int minSamples)
 	{
 		const unsigned int maxSamples = static_cast<unsigned int>(scene.getSampleCount());
-		const unsigned int minSamples = static_cast<unsigned int>(
-			std::min(scene.getAdaptiveMinSamples(), scene.getSampleCount())
-		);
 		const unsigned int checkInterval = static_cast<unsigned int>(scene.getAdaptiveCheckInterval());
 		const unsigned int darkMin = std::max(256u, minSamples + (3u * checkInterval));
 
@@ -186,7 +436,8 @@ namespace
 	bool	adaptiveSampleConverged(
 		const Scene& scene,
 		unsigned int samplesUsed,
-		const AdaptiveAccumulator& accumulator
+		const AdaptiveAccumulator& accumulator,
+		PrimaryRayClass primaryClass
 	)
 	{
 		const unsigned int maxSamples = static_cast<unsigned int>(scene.getSampleCount());
@@ -196,9 +447,7 @@ namespace
 			return (true);
 		}
 
-		const unsigned int minSamples = static_cast<unsigned int>(
-			std::min(scene.getAdaptiveMinSamples(), scene.getSampleCount())
-		);
+		const unsigned int minSamples = adaptiveMinimumSamples(scene, primaryClass);
 		if (samplesUsed < minSamples)
 		{
 			return (false);
@@ -219,8 +468,10 @@ namespace
 		const double threshold = scene.getAdaptiveThreshold();
 
 		if (
+			primaryClass != PrimaryRayClass::Background
+			&&
 			accumulator.maxLuminance < 0.02
-			&& samplesUsed < darkMinimumSamples(scene)
+			&& samplesUsed < darkMinimumSamples(scene, minSamples)
 		)
 		{
 			return (false);
@@ -257,9 +508,25 @@ namespace
 
 	bool	adaptiveSamplingCanStop(const Scene& scene)
 	{
+		const unsigned int backgroundMinimum = adaptiveMinimumSamples(
+			scene,
+			PrimaryRayClass::Background
+		);
+		const unsigned int surfaceMinimum = adaptiveMinimumSamples(
+			scene,
+			PrimaryRayClass::Surface
+		);
+		const unsigned int volumeMinimum = adaptiveMinimumSamples(
+			scene,
+			PrimaryRayClass::Volume
+		);
+		const unsigned int minimum = std::min(
+			backgroundMinimum,
+			std::min(surfaceMinimum, volumeMinimum)
+		);
 		return (
 			scene.getAdaptiveSampling()
-			&& scene.getAdaptiveMinSamples() < scene.getSampleCount()
+			&& minimum < static_cast<unsigned int>(scene.getSampleCount())
 		);
 	}
 
@@ -358,6 +625,7 @@ namespace
 		buffers->colorA[index] = meanColor(halfA.colorSum, halfA.count, fallbackColor);
 		buffers->colorB[index] = meanColor(halfB.colorSum, halfB.count, fallbackColor);
 		buffers->colorVariance[index] = colorVariance(colorSum, colorSquareSum, sampleCount);
+		buffers->sampleCount[index] = sampleCount;
 		buffers->featuresA[index] = meanFeature(halfA.featureSum, halfA.count, fallbackFeature);
 		buffers->featuresB[index] = meanFeature(halfB.featureSum, halfB.count, fallbackFeature);
 		buffers->featureVariance[index] = featureVariance(featureSum, featureSquareSum, sampleCount);
@@ -381,11 +649,19 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 	stats.renderedSamples = 0;
 	stats.averageSamplesPerPixel = 0.0;
 	stats.renderMS = 0.0;
+	stats.volumeGuideMS = 0.0;
 	stats.denoiseMS = 0.0;
 	stats.postProcessMS = 0.0;
 	stats.totalMS = 0.0;
+	stats.displayDiagnosticsValid = false;
 	scene.setRenderStats(stats);
 	scene.clearDenoisedImage();
+	Clock guideClock;
+	guideClock.start();
+	trainVolumeGuide(scene, renderCamera, width, height, threadCount);
+	if (scene.getVolumeGuidingField())
+		stats.volumeGuideMS = guideClock.elapsedMS();
+	scene.setRenderStats(stats);
 	if (scene.getDenoise())
 	{
 		scene.initializeDenoiseBuffers(width, height);
@@ -539,13 +815,39 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 		);
 
 		nforSettings.threadCount = scene.getRenderingThreads();
+		// Keep the default two-pixel regression radius at low sample counts too.
+		// A wider window removes the small cloudlets that the deterministic volume
+		// feature pass was specifically designed to preserve.
 		if (!scene.getBenchmarkMode())
 		{
 			nforSettings.progressCallback = updateDenoiseProgress;
 			nforSettings.progressUserData = &denoiseProgress;
 		}
 		denoiseClock.start();
-		denoisedImage = Denoise::applyNFOR(*scene.getDenoiseBuffers(), nforSettings);
+		const Denoise::NFORBuffers* denoiseBuffers = scene.getDenoiseBuffers();
+		denoisedImage = Denoise::applyNFOR(*denoiseBuffers, nforSettings);
+		if (
+			denoisedImage
+			&& denoiseBuffers->deterministicColor.size()
+				== denoiseBuffers->width * denoiseBuffers->height
+		)
+		{
+			for (std::size_t y = 0; y < denoiseBuffers->height; y++)
+			{
+				for (std::size_t x = 0; x < denoiseBuffers->width; x++)
+				{
+					const std::size_t index = denoiseBuffers->index(x, y);
+					denoisedImage->setPixelUnchecked(
+						x,
+						y,
+						cleanColor(
+							denoisedImage->getPixelUnchecked(x, y)
+							+ denoiseBuffers->deterministicColor[index]
+						)
+					);
+				}
+			}
+		}
 		stats.denoiseMS = denoiseClock.elapsedMS();
 		if (!scene.getBenchmarkMode())
 		{
@@ -575,6 +877,7 @@ void	Renderer::internal::_manageThreads(Scene& scene)
 		scene.setDenoisedImage(std::move(denoisedImage));
 	}
 	applyPostProcessing(scene, *scene.getImage());
+	computeDisplayDiagnostics(*scene.getImage(), stats);
 	stats.postProcessMS = postProcessClock.elapsedMS();
 	if (!scene.getBenchmarkMode())
 	{
@@ -593,13 +896,26 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 	if (denoiseBuffers == nullptr)
 	{
 		Color pixelColor(0.0, 0.0, 0.0);
+		Color primarySingleScatteringSum(0.0, 0.0, 0.0);
+		unsigned int primarySingleScatteringCount = 0;
 		AdaptiveAccumulator adaptiveAccumulator;
+		PrimaryRayClass primaryClass = PrimaryRayClass::Background;
 		unsigned int samplesUsed = 0;
 
 		for (unsigned int samples = 0; samples < sampleCount; samples++)
 		{
 			Sampler::beginPixelSample(x, y, samples);
-			const Color sampleColor = cleanColor(_calculatePixelColor(scene, renderCamera, x, y));
+			Color sampleColor;
+			if (samples < PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT)
+			{
+				const RenderSample sample = _calculatePixelSample(scene, renderCamera, x, y, true);
+				sampleColor = cleanColor(sample.color);
+				primarySingleScatteringSum += cleanColor(sample.primarySingleScattering);
+				primarySingleScatteringCount++;
+				primaryClass = mergePrimaryRayClass(primaryClass, sample.primaryClass);
+			}
+			else
+				sampleColor = cleanColor(_calculatePixelColor(scene, renderCamera, x, y));
 			Sampler::endPixelSample();
 
 			pixelColor += sampleColor;
@@ -607,11 +923,21 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 			if (adaptiveSampling)
 			{
 				adaptiveAccumulator.add(sampleColor);
-				if (adaptiveSampleConverged(scene, samplesUsed, adaptiveAccumulator))
+				if (adaptiveSampleConverged(
+					scene,
+					samplesUsed,
+					adaptiveAccumulator,
+					primaryClass
+				))
 				{
 					break;
 				}
 			}
+		}
+		if (primarySingleScatteringCount > 0)
+		{
+			pixelColor += primarySingleScatteringSum
+				* (static_cast<double>(samplesUsed) / static_cast<double>(primarySingleScatteringCount));
 		}
 		pixelColor /= static_cast<double>(samplesUsed);
 		scene.getImage()->setPixelUnchecked(x, y, cleanColor(pixelColor));
@@ -620,7 +946,11 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 
 	Color pixelColor(0.0, 0.0, 0.0);
 	Color pixelColorSquare(0.0, 0.0, 0.0);
+	Color primarySingleScatteringSum(0.0, 0.0, 0.0);
+	double primaryVolumeOpacitySum = 0.0;
+	unsigned int primarySingleScatteringCount = 0;
 	AdaptiveAccumulator adaptiveAccumulator;
+	PrimaryRayClass primaryClass = PrimaryRayClass::Background;
 	Denoise::FeatureVector featureSum;
 	Denoise::FeatureVector featureSquareSum;
 	DenoiseHalfAccumulator halfA;
@@ -630,16 +960,45 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 	for (unsigned int samples = 0; samples < sampleCount; samples++)
 	{
 		const unsigned int halfIndex = samples % 2;
+		DenoiseHalfAccumulator& half = (halfIndex == 0) ? halfA : halfB;
+		Color sampleColor;
+		Denoise::FeatureVector sampleFeatures;
 
 		Sampler::beginPixelSample(x, y, samples, halfIndex + 1);
-		RenderSample sample = _calculatePixelSample(scene, renderCamera, x, y);
+		if (samples < DENOISE_GUIDE_SAMPLE_COUNT)
+		{
+			const bool calculatePrimarySingleScattering = samples < PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT;
+			const RenderSample sample = _calculatePixelSample(
+				scene,
+				renderCamera,
+				x,
+				y,
+				calculatePrimarySingleScattering
+			);
+			sampleColor = cleanColor(sample.color);
+			sampleFeatures = sample.features;
+			primaryClass = mergePrimaryRayClass(primaryClass, sample.primaryClass);
+			if (calculatePrimarySingleScattering)
+			{
+				primarySingleScatteringSum += cleanColor(sample.primarySingleScattering);
+				primaryVolumeOpacitySum += std::clamp(
+					sample.primaryVolumeOpacity,
+					0.0,
+					1.0
+				);
+				primarySingleScatteringCount++;
+			}
+		}
+		else
+		{
+			sampleColor = cleanColor(_calculatePixelColor(scene, renderCamera, x, y));
+			sampleFeatures = meanFeature(half.featureSum, half.count, Denoise::FeatureVector());
+		}
 		Sampler::endPixelSample();
-		DenoiseHalfAccumulator& half = (halfIndex == 0) ? halfA : halfB;
-		Color sampleColor = cleanColor(sample.color);
 
 		half.colorSum += sampleColor;
 		half.count++;
-		addDenoiseFeatureSample(half, featureSum, featureSquareSum, sample.features);
+		addDenoiseFeatureSample(half, featureSum, featureSquareSum, sampleFeatures);
 		pixelColor += sampleColor;
 		pixelColorSquare += Color(
 			sampleColor.getRed() * sampleColor.getRed(),
@@ -650,15 +1009,21 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 		if (adaptiveSampling)
 		{
 			adaptiveAccumulator.add(sampleColor);
-			if (adaptiveSampleConverged(scene, samplesUsed, adaptiveAccumulator))
+			if (adaptiveSampleConverged(
+				scene,
+				samplesUsed,
+				adaptiveAccumulator,
+				primaryClass
+			))
 			{
 				break;
 			}
 		}
 	}
+	const Color control = primarySingleScatteringCount > 0
+		? primarySingleScatteringSum / static_cast<double>(primarySingleScatteringCount)
+		: Color(0.0, 0.0, 0.0);
 	const Color pixelColorSum = pixelColor;
-	pixelColor /= static_cast<double>(samplesUsed);
-	pixelColor = cleanColor(pixelColor);
 	storeDenoisePixel(
 		scene,
 		x,
@@ -671,6 +1036,17 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 		featureSquareSum,
 		samplesUsed
 	);
+	if (denoiseBuffers->deterministicColor.size() > denoiseBuffers->index(x, y))
+		denoiseBuffers->deterministicColor[denoiseBuffers->index(x, y)] = control;
+	if (denoiseBuffers->volumeOpacity.size() > denoiseBuffers->index(x, y))
+	{
+		denoiseBuffers->volumeOpacity[denoiseBuffers->index(x, y)]
+			= primarySingleScatteringCount > 0
+				? primaryVolumeOpacitySum
+					/ static_cast<double>(primarySingleScatteringCount)
+				: 0.0;
+	}
+	pixelColor = cleanColor(pixelColor / static_cast<double>(samplesUsed) + control);
 
 	scene.getImage()->setPixelUnchecked(x, y, pixelColor);
 	return (samplesUsed);
