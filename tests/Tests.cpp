@@ -26,8 +26,11 @@
 #include "Renderer/Renderer.hpp"
 #include "Scene/Scene.hpp"
 #include "SceneFile/SceneFile.hpp"
+#include "SparseVolumeGrid.hpp"
 #include "Hittables/BVHNode.hpp"
 #include "Hittables/ConstantVolume.hpp"
+#include "Hittables/CloudVolume.hpp"
+#include "Hittables/SparseGridVolume.hpp"
 #include "Hittables/Cube.hpp"
 #include "Hittables/DirectionalLight.hpp"
 #include "Hittables/Mesh.hpp"
@@ -41,6 +44,7 @@
 #include "Random.hpp"
 #include "Transform.hpp"
 #include "Utilities.hpp"
+#include "VolumeGuidingField.hpp"
 #include "../src/renderer/RendererInternal.hpp"
 
 #include <cmath>
@@ -1284,6 +1288,8 @@ namespace
 				<< "[settings]\n"
 				<< "adaptive=1\n"
 				<< "adaptiveminsamples=32\n"
+				<< "adaptivebackgroundminsamples=8\n"
+				<< "adaptive_volume_min_samples=48\n"
 				<< "adaptivethreshold=0.015\n"
 				<< "adaptivecheckinterval=8\n\n";
 		}
@@ -1292,9 +1298,50 @@ namespace
 		SceneFile::read(scene, scenePath.string());
 		require(scene.getAdaptiveSampling(), "Scene adaptive setting was not applied.");
 		require(scene.getAdaptiveMinSamples() == 32, "Scene adaptive minimum samples setting was not applied.");
+		require(
+			scene.getAdaptiveBackgroundMinSamples() == 8,
+			"Scene adaptive background minimum samples setting was not applied."
+		);
+		require(
+			scene.getAdaptiveVolumeMinSamples() == 48,
+			"Scene adaptive volume minimum samples setting was not applied."
+		);
 		requireNear(scene.getAdaptiveThreshold(), 0.015, "Scene adaptive threshold setting was not applied.");
 		require(scene.getAdaptiveCheckInterval() == 8, "Scene adaptive check interval setting was not applied.");
 
+		std::filesystem::remove(scenePath);
+	}
+
+	void	testSceneFileVolumeGuidingSettings(void)
+	{
+		const std::filesystem::path scenePath = std::filesystem::temp_directory_path()
+			/ "luz_scene_volume_guiding_test.luz";
+		{
+			std::ofstream stream(scenePath);
+			stream
+				<< "[settings]\n"
+				<< "volume_guiding_samples=4096\n"
+				<< "volume_guiding_resolution=12\n"
+				<< "volume_guiding_lobes=24\n"
+				<< "volume_guiding_anisotropy=0.85\n"
+				<< "volume_guiding_strength=0.3\n"
+				<< "volume_guiding_start_bounce=2\n\n";
+		}
+
+		Scene scene;
+		SceneFile::read(scene, scenePath.string());
+		require(scene.getVolumeGuidingTrainingSamples() == 4096,
+			"Scene volume guiding training samples were not parsed.");
+		require(scene.getVolumeGuidingResolution() == 12,
+			"Scene volume guiding resolution was not parsed.");
+		require(scene.getVolumeGuidingLobes() == 24,
+			"Scene volume guiding lobe count was not parsed.");
+		requireNear(scene.getVolumeGuidingAnisotropy(), 0.85,
+			"Scene volume guiding anisotropy was not parsed.");
+		requireNear(scene.getVolumeGuidingStrength(), 0.3,
+			"Scene volume guiding strength was not parsed.");
+		require(scene.getVolumeGuidingStartBounce() == 2,
+			"Scene volume guiding start bounce was not parsed.");
 		std::filesystem::remove(scenePath);
 	}
 
@@ -1422,9 +1469,23 @@ namespace
 		requireSceneFileSettingThrows("samples=0", "Scene file accepted zero samples.");
 		requireSceneFileSettingThrows("adaptive=2", "Scene file accepted non-binary adaptive setting.");
 		requireSceneFileSettingThrows("adaptiveminsamples=0", "Scene file accepted zero adaptive minimum samples.");
+		requireSceneFileSettingThrows(
+			"adaptivebackgroundminsamples=-1",
+			"Scene file accepted negative adaptive background minimum samples."
+		);
+		requireSceneFileSettingThrows(
+			"adaptivevolumeminsamples=-1",
+			"Scene file accepted negative adaptive volume minimum samples."
+		);
 		requireSceneFileSettingThrows("adaptivethreshold=0", "Scene file accepted zero adaptive threshold.");
 		requireSceneFileSettingThrows("adaptivecheckinterval=0", "Scene file accepted zero adaptive check interval.");
 		requireSceneFileSettingThrows("maxlightbounces=-1", "Scene file accepted negative max light bounces.");
+		requireSceneFileSettingThrows("volume_guiding_samples=-1", "Scene file accepted negative guide samples.");
+		requireSceneFileSettingThrows("volume_guiding_resolution=0", "Scene file accepted zero guide resolution.");
+		requireSceneFileSettingThrows("volume_guiding_lobes=3", "Scene file accepted too few guide lobes.");
+		requireSceneFileSettingThrows("volume_guiding_anisotropy=1", "Scene file accepted guide anisotropy above 0.95.");
+		requireSceneFileSettingThrows("volume_guiding_strength=0.8", "Scene file accepted guide strength above 0.75.");
+		requireSceneFileSettingThrows("volume_guiding_start_bounce=-1", "Scene file accepted a negative guide start bounce.");
 		requireSceneFileSettingThrows("gamma=1", "Scene file accepted removed gamma setting.");
 		requireSceneFileSettingThrows("tonemapping=1", "Scene file accepted removed tone mapping setting.");
 		requireSceneFileSettingThrows("viewtransform=raw", "Scene file accepted view_transform alias.");
@@ -3252,6 +3313,370 @@ namespace
 		std::filesystem::remove(scenePath);
 	}
 
+	void	testSceneFileLoadsProceduralCloudBlock(void)
+	{
+		const std::filesystem::path scenePath = std::filesystem::temp_directory_path() / "luz_cloud_block_test.luz";
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[settings]\n"
+				<< "meters_per_unit=2\n\n"
+				<< "[scene]\n"
+				<< "cloud thunderhead {\n"
+				<< "type=cumulonimbus\n"
+				<< "position=(10,20,30)\n"
+				<< "size=(4000,8000,5000)\n"
+				<< "coverage=0.52\n"
+				<< "extinction=0.02\n"
+				<< "albedo=(0.98,0.99,1.0)\n"
+				<< "anisotropy=0.86\n"
+				<< "backscatter=-0.3\n"
+				<< "forward_weight=0.9\n"
+				<< "feature_scale=750\n"
+				<< "detail=0.8\n"
+				<< "erosion=0.4\n"
+				<< "puffiness=0.88\n"
+				<< "towering=0.94\n"
+				<< "dominance=0.91\n"
+				<< "overhang=0.83\n"
+				<< "fine_detail=0.87\n"
+				<< "shear_direction=(1,0,-0.25)\n"
+				<< "seed=1234\n"
+				<< "offset=(1,2,3)\n"
+				<< "quality=cinematic\n"
+				<< "}\n";
+		}
+
+		Scene scene;
+		SceneFile::read(scene, scenePath.string());
+		require(scene.getHittables().size() == 1, "Cloud block did not load one hittable.");
+		const std::shared_ptr<CloudVolume> cloud = std::dynamic_pointer_cast<CloudVolume>(scene.getHittables()[0]);
+		require(cloud != nullptr, "Cloud block did not create a CloudVolume.");
+		const CloudParameters& parameters = cloud->getParameters();
+		require(parameters.type == CloudType::Cumulonimbus, "Cloud type was not parsed.");
+		requireVectorNear(parameters.position, Vector3(10.0, 20.0, 30.0), "Cloud position");
+		requireVectorNear(parameters.size, Vector3(4000.0, 8000.0, 5000.0), "Cloud size");
+		requireNear(parameters.coverage, 0.52, "Cloud coverage was not parsed.");
+		requireNear(parameters.extinction, 0.02, "Cloud extinction was not parsed.");
+		requireColorNear(parameters.albedo, Color(0.98, 0.99, 1.0), "Cloud albedo");
+		requireNear(parameters.anisotropy, 0.86, "Cloud anisotropy was not parsed.");
+		requireNear(parameters.backscatter, -0.3, "Cloud backscatter was not parsed.");
+		requireNear(parameters.forwardWeight, 0.9, "Cloud forward phase weight was not parsed.");
+		requireNear(parameters.featureScale, 750.0, "Cloud feature scale was not parsed.");
+		requireNear(parameters.detail, 0.8, "Cloud detail was not parsed.");
+		requireNear(parameters.erosion, 0.4, "Cloud erosion was not parsed.");
+		requireNear(parameters.puffiness, 0.88, "Cloud puffiness was not parsed.");
+		requireNear(parameters.towering, 0.94, "Cloud towering was not parsed.");
+		requireNear(parameters.dominance, 0.91, "Cloud dominance was not parsed.");
+		requireNear(parameters.overhang, 0.83, "Cloud overhang was not parsed.");
+		requireNear(parameters.fineDetail, 0.87, "Cloud fine detail was not parsed.");
+		requireVectorNear(parameters.shearDirection, Vector3(1.0, 0.0, -0.25), "Cloud shear direction");
+		require(parameters.seed == 1234, "Cloud seed was not parsed.");
+		requireVectorNear(parameters.offset, Vector3(1.0, 2.0, 3.0), "Cloud noise offset");
+		require(parameters.detailOctaves >= 4, "Cinematic cloud quality did not raise detail octaves.");
+		require(parameters.maxTrackingSteps == 1024, "Cinematic cloud quality did not raise tracking steps.");
+		requireNear(parameters.metersPerUnit, 2.0, "Cloud did not inherit meters_per_unit.");
+		require(cloud->getMaterial()->getType() == HENYEY_GREENSTEIN, "Cloud did not use a phase material.");
+		const HenyeyGreenstein* cloudPhase = dynamic_cast<const HenyeyGreenstein*>(cloud->getMaterial());
+		require(cloudPhase != nullptr, "Cloud phase has the wrong runtime type.");
+		requireNear(cloudPhase->getSecondaryAnisotropy(), -0.3, "Cloud phase backscatter is wrong.");
+		requireNear(cloudPhase->getPrimaryWeight(), 0.9, "Cloud phase mixture weight is wrong.");
+
+		AABB boundingBox;
+		require(cloud->createBoundingBox(boundingBox), "Cloud did not create a bounding box.");
+		requireVectorNear(boundingBox.getMinimum(), Vector3(-1990.0, -3980.0, -2470.0), "Cloud minimum bounds");
+		requireVectorNear(boundingBox.getMaximum(), Vector3(2010.0, 4020.0, 2530.0), "Cloud maximum bounds");
+		std::filesystem::remove(scenePath);
+	}
+
+	void	testSceneFileCloudAliasesAndQualityPrecedence(void)
+	{
+		const std::filesystem::path scenePath = std::filesystem::temp_directory_path() / "luz_cloud_alias_test.luz";
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[scene]\n"
+				<< "cloud layered {\n"
+				<< "preset=strato-cumulus\n"
+				<< "center=(1,2,3)\n"
+				<< "dimensions=(100,200,300)\n"
+				<< "width=400\n"
+				<< "height=500\n"
+				<< "depth=600\n"
+				<< "sigma_t=0.006\n"
+				<< "scattering_color=(0.91,0.92,0.93)\n"
+				<< "g=0.7\n"
+				<< "backscatter_anisotropy=-0.2\n"
+				<< "phase_mix=0.8\n"
+				<< "droplet_size_microns=20\n"
+				<< "formation_scale=1.35\n"
+				<< "noise_scale=90\n"
+				<< "billowing=0.41\n"
+				<< "convection=0.22\n"
+				<< "hero=0.13\n"
+				<< "crown=0.27\n"
+				<< "micro_detail=0.61\n"
+				<< "scatter_falloff=0.81\n"
+				<< "scatter_compensation=0.63\n"
+				<< "wind_direction=(0,0,1)\n"
+				<< "noise_offset=(4,5,6)\n"
+				<< "octaves=5\n"
+				<< "tracking_steps=333\n"
+				<< "quality=preview\n"
+				<< "}\n";
+		}
+
+		Scene scene;
+		SceneFile::read(scene, scenePath.string());
+		require(scene.getHittables().size() == 1, "Cloud alias scene did not load one hittable.");
+		const std::shared_ptr<CloudVolume> cloud = std::dynamic_pointer_cast<CloudVolume>(scene.getHittables()[0]);
+		require(cloud != nullptr, "Cloud alias scene did not create a CloudVolume.");
+		const CloudParameters& parameters = cloud->getParameters();
+		require(parameters.type == CloudType::Stratocumulus, "Hyphenated stratocumulus alias was not parsed.");
+		requireVectorNear(parameters.position, Vector3(1.0, 2.0, 3.0), "Cloud center alias");
+		requireVectorNear(parameters.size, Vector3(400.0, 500.0, 600.0), "Cloud per-axis size overrides");
+		requireNear(parameters.extinction, 0.006, "Cloud sigma_t alias was not parsed.");
+		requireColorNear(parameters.albedo, Color(0.91, 0.92, 0.93), "Cloud scattering color alias");
+		requireNear(parameters.anisotropy, 0.7, "Cloud g alias was not parsed.");
+		requireNear(parameters.backscatter, -0.2, "Cloud backscatter alias was not parsed.");
+		requireNear(parameters.forwardWeight, 0.8, "Cloud phase mix alias was not parsed.");
+		requireNear(parameters.dropletSizeMicrons, 20.0, "Cloud droplet size alias was not parsed.");
+		requireNear(parameters.macroScale, 1.35, "Cloud formation scale alias was not parsed.");
+		requireNear(parameters.featureScale, 90.0, "Cloud noise scale alias was not parsed.");
+		requireNear(parameters.puffiness, 0.41, "Cloud billowing alias was not parsed.");
+		requireNear(parameters.towering, 0.22, "Cloud convection alias was not parsed.");
+		requireNear(parameters.dominance, 0.13, "Cloud hero alias was not parsed.");
+		requireNear(parameters.overhang, 0.27, "Cloud crown alias was not parsed.");
+		requireNear(parameters.fineDetail, 0.61, "Cloud micro detail alias was not parsed.");
+		requireNear(parameters.multipleScatteringFalloff, 0.81, "Cloud scattering falloff alias was not parsed.");
+		requireNear(parameters.multipleScatteringCompensation, 0.63, "Cloud scattering compensation alias was not parsed.");
+		const HenyeyGreenstein* phase = dynamic_cast<const HenyeyGreenstein*>(cloud->getMaterial());
+		require(phase != nullptr && phase->usesDropletPhase(), "Cloud droplet phase was not enabled.");
+		requireNear(phase->getDropletSizeMicrons(), 20.0, "Cloud droplet phase size is wrong.");
+		requireVectorNear(parameters.shearDirection, Vector3(0.0, 0.0, 1.0), "Cloud wind direction alias");
+		requireVectorNear(parameters.offset, Vector3(4.0, 5.0, 6.0), "Cloud noise offset alias");
+		require(parameters.detailOctaves == 5, "Explicit cloud octaves did not override preview quality.");
+		require(parameters.maxTrackingSteps == 333, "Explicit cloud tracking steps did not override preview quality.");
+		require(CloudVolume::parseType("strato_cumulus") == CloudType::Stratocumulus, "Underscored stratocumulus alias was not parsed.");
+		require(CloudVolume::parseType("storm") == CloudType::Cumulonimbus, "Storm cloud alias was not parsed.");
+		std::filesystem::remove(scenePath);
+
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[scene]\n"
+				<< "cloud cinematic_defaults {\n"
+				<< "quality=cinematic\n"
+				<< "}\n";
+		}
+		{
+			Scene cinematicScene;
+			SceneFile::read(cinematicScene, scenePath.string());
+			require(cinematicScene.getHittables().size() == 1, "Cinematic cloud quality scene did not load one hittable.");
+			const std::shared_ptr<CloudVolume> cinematicCloud = std::dynamic_pointer_cast<CloudVolume>(cinematicScene.getHittables()[0]);
+			require(cinematicCloud != nullptr, "Cinematic cloud quality scene did not create a CloudVolume.");
+			require(cinematicCloud->getParameters().detailOctaves == 4, "Cinematic quality did not promote cumulus detail octaves.");
+			require(cinematicCloud->getParameters().maxTrackingSteps == 1024, "Cinematic quality did not promote the integration budget.");
+		}
+		std::filesystem::remove(scenePath);
+
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[scene]\n"
+				<< "cloud invalid_quality {\n"
+				<< "quality=ultra\n"
+				<< "}\n";
+		}
+		Scene invalidScene;
+		requireThrows(
+			[&invalidScene, &scenePath]()
+			{
+				SceneFile::read(invalidScene, scenePath.string());
+			},
+			"Cloud parser accepted an unknown quality value."
+		);
+		requireThrows(
+			[]()
+			{
+				CloudVolume::parseType("lenticular");
+			},
+			"Cloud parser accepted an unknown generation type."
+		);
+		std::filesystem::remove(scenePath);
+
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[scene]\n"
+				<< "cloud malformed_number {\n"
+				<< "coverage=0.5oops\n"
+				<< "}\n";
+		}
+		Scene malformedDoubleScene;
+		requireThrows(
+			[&malformedDoubleScene, &scenePath]()
+			{
+				SceneFile::read(malformedDoubleScene, scenePath.string());
+			},
+			"Cloud parser accepted trailing junk in a floating-point value."
+		);
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[scene]\n"
+				<< "cloud malformed_integer {\n"
+				<< "detail_octaves=4.9\n"
+				<< "}\n";
+		}
+		Scene malformedIntegerScene;
+		requireThrows(
+			[&malformedIntegerScene, &scenePath]()
+			{
+				SceneFile::read(malformedIntegerScene, scenePath.string());
+			},
+			"Cloud parser accepted a fractional integer value."
+		);
+		std::filesystem::remove(scenePath);
+	}
+
+	void	testProceduralCloudDensityAndDeltaTracking(void)
+	{
+		CloudParameters parameters = CloudVolume::preset(CloudType::Cumulus);
+		parameters.position = Vector3(0.0, 0.0, 0.0);
+		parameters.size = Vector3(20.0, 10.0, 20.0);
+		parameters.featureScale = 4.0;
+		parameters.coverage = 1.0;
+		parameters.erosion = 0.0;
+		parameters.extinction = 100.0;
+		parameters.albedo = Color(0.05, 0.06, 0.07);
+		parameters.seed = 77;
+		CloudVolume cloud(parameters);
+
+		double maximumDensity = 0.0;
+		for (int y = -4; y <= 4; y += 2)
+			for (int z = -8; z <= 8; z += 2)
+				for (int x = -8; x <= 8; x += 2)
+				{
+					const Vector3 position(x, y, z);
+					const double density = cloud.densityAt(position);
+					require(density >= 0.0 && density <= 1.0, "Cloud density escaped its majorant range.");
+					requireNear(density, cloud.densityAt(position), "Cloud density is not deterministic.");
+					maximumDensity = std::max(maximumDensity, density);
+				}
+		require(maximumDensity > 0.1, "Procedural cloud generated no meaningful density.");
+		requireNear(cloud.densityAt(Vector3(100.0, 0.0, 0.0)), 0.0, "Cloud density leaked outside its bounds.");
+
+		Sampler::setRenderSeed(2024);
+		Sampler::beginPixelSample(3, 5, 0);
+		Ray ray(Vector3(0.0, 0.0, 15.0), Vector3(0.0, 0.0, -1.0));
+		HitRecord hitRecord;
+		require(cloud.hit(ray, hitRecord, T_MIN, T_MAX), "Dense procedural cloud was not delta-tracked.");
+		Sampler::endPixelSample();
+		require(hitRecord.t0 >= 5.0 && hitRecord.t0 <= 25.0, "Cloud collision was outside its bounds.");
+		require(hitRecord.material != nullptr && hitRecord.material->getType() == HENYEY_GREENSTEIN, "Cloud collision did not use its phase function.");
+
+		double stableFeatureT = -1.0;
+		for (std::uint32_t sampleIndex = 0; sampleIndex < 3; sampleIndex++)
+		{
+			Sampler::beginPixelSample(3, 5, sampleIndex);
+			Sampler::setBounce(0);
+			Sampler::setFeatureSampling(true);
+			Ray featureRay(Vector3(0.0, 0.0, 15.0), Vector3(0.0, 0.0, -1.0));
+			HitRecord featureHit;
+			require(cloud.hit(featureRay, featureHit, T_MIN, T_MAX), "Dense cloud produced no deterministic feature hit.");
+			if (sampleIndex == 0)
+			{
+				stableFeatureT = featureHit.t0;
+				require(
+					featureHit.u > parameters.albedo.getRed() && featureHit.u <= 1.0,
+					"Cloud feature hit stored albedo instead of deterministic density."
+				);
+			}
+			else
+				requireNear(featureHit.t0, stableFeatureT, "Cloud feature depth changed with the stochastic sample");
+			Sampler::setFeatureSampling(false);
+			Sampler::endPixelSample();
+		}
+	}
+
+	void	testVolumeShadowTransmittance(void)
+	{
+		const auto boundary = std::make_shared<Sphere>(
+			Vector3(0.0, 0.0, 0.0),
+			2.0,
+			std::make_shared<Lambertian>(Color(0.0, 0.0, 0.0))
+		);
+		auto volume = std::make_shared<ConstantVolume>(
+			boundary,
+			std::make_shared<Isotropic>(Color(1.0, 1.0, 1.0)),
+			0.5
+		);
+		Ray volumeRay(Vector3(0.0, 0.0, 3.0), Vector3(0.0, 0.0, -1.0));
+		const Color exact = volume->shadowTransmittance(volumeRay, T_MIN, T_MAX);
+		requireNear(exact.getRed(), std::exp(-2.0), "Constant volume shadow transmittance");
+
+		std::vector<std::shared_ptr<Hittable>> hittables = {volume};
+		BVHNode bvh(hittables);
+		Ray bvhRay(Vector3(0.0, 0.0, 3.0), Vector3(0.0, 0.0, -1.0));
+		requireNear(
+			bvh.shadowTransmittance(bvhRay, T_MIN, T_MAX).getRed(),
+			std::exp(-2.0),
+			"BVH volume shadow transmittance"
+		);
+
+		CloudParameters parameters = CloudVolume::preset(CloudType::Cumulus);
+		parameters.position = Vector3(0.0, 0.0, 0.0);
+		parameters.size = Vector3(20.0, 10.0, 20.0);
+		parameters.featureScale = 4.0;
+		parameters.coverage = 1.0;
+		parameters.erosion = 0.0;
+		parameters.extinction = 1.0;
+		parameters.maxTrackingSteps = 128;
+		CloudVolume cloud(parameters);
+		CloudParameters invalidCompensation = parameters;
+		invalidCompensation.multipleScatteringCompensation = 2.01;
+		requireThrows(
+			[&invalidCompensation]()
+			{
+				CloudVolume invalidCloud(invalidCompensation);
+			},
+			"Cloud accepted an out-of-range multiple-scattering compensation."
+		);
+		Sampler::beginPixelSample(9, 4, 0);
+		Ray cloudRay(Vector3(0.0, 0.0, 15.0), Vector3(0.0, 0.0, -1.0));
+		const Color cloudVisibility = cloud.shadowTransmittance(cloudRay, T_MIN, T_MAX);
+		Sampler::endPixelSample();
+		require(
+			cloudVisibility.getRed() >= 0.0 && cloudVisibility.getRed() < 1.0,
+			"Cloud shadow transmittance escaped its physical range or ignored cloud density."
+		);
+		double entryT = 0.0;
+		double exitT = 0.0;
+		require(
+			cloud.integrationInterval(cloudRay, T_MIN, T_MAX, entryT, exitT)
+			&& entryT < exitT,
+			"Cloud exposed no valid deterministic integration interval."
+		);
+		const Vector3 samplePosition = cloudRay.pointAtRay((entryT + exitT) * 0.5);
+		const double extinction = cloud.extinctionAt(samplePosition);
+		require(
+			extinction >= 0.0 && extinction <= parameters.extinction,
+			"Cloud point extinction escaped its declared majorant."
+		);
+		const Color scattering = cloud.singleScatteringCoefficientAt(
+			samplePosition,
+			Vector3(0.0, 0.0, -1.0),
+			Vector3(0.0, 1.0, 0.0)
+		);
+		require(
+			scattering.getRed() >= 0.0
+			&& scattering.getGreen() >= 0.0
+			&& scattering.getBlue() >= 0.0,
+			"Cloud point scattering coefficient became negative."
+		);
+	}
+
 	void	testSceneFileMetersPerUnitScalesVolumeDensity(void)
 	{
 		const std::filesystem::path scenePath = std::filesystem::temp_directory_path() / "luz_volume_density_scale_test.luz";
@@ -4303,11 +4728,21 @@ namespace
 		std::unique_ptr<Scene> tunedScene = parseFlags({
 			"--adaptive",
 			"--adaptive-min-samples", "24",
+			"--adaptive-background-min-samples", "6",
+			"--adaptive-volume-min-samples", "40",
 			"--adaptive-threshold", "0.03",
 			"--adaptive-check-interval", "6"
 		});
 		require(tunedScene->getAdaptiveSampling(), "Adaptive sampling was not enabled.");
 		require(tunedScene->getAdaptiveMinSamples() == 24, "--adaptive-min-samples was not parsed.");
+		require(
+			tunedScene->getAdaptiveBackgroundMinSamples() == 6,
+			"--adaptive-background-min-samples was not parsed."
+		);
+		require(
+			tunedScene->getAdaptiveVolumeMinSamples() == 40,
+			"--adaptive-volume-min-samples was not parsed."
+		);
 		requireNear(tunedScene->getAdaptiveThreshold(), 0.03, "--adaptive-threshold was not parsed.");
 		require(tunedScene->getAdaptiveCheckInterval() == 6, "--adaptive-check-interval was not parsed.");
 	}
@@ -4317,6 +4752,14 @@ namespace
 		requireFlagParseThrows({"--samples", "0"}, "CLI accepted zero samples.");
 		requireFlagParseThrows({"--adaptive", "maybe"}, "CLI accepted invalid adaptive value.");
 		requireFlagParseThrows({"--adaptive-min-samples", "0"}, "CLI accepted zero adaptive minimum samples.");
+		requireFlagParseThrows(
+			{"--adaptive-background-min-samples", "-1"},
+			"CLI accepted negative adaptive background minimum samples."
+		);
+		requireFlagParseThrows(
+			{"--adaptive-volume-min-samples", "-1"},
+			"CLI accepted negative adaptive volume minimum samples."
+		);
 		requireFlagParseThrows({"--adaptive-threshold", "0"}, "CLI accepted zero adaptive threshold.");
 		requireFlagParseThrows({"--adaptive-check-interval", "0"}, "CLI accepted zero adaptive check interval.");
 		requireFlagParseThrows({"--maxLightBounces", "-1"}, "CLI accepted negative max light bounces.");
@@ -4359,6 +4802,14 @@ namespace
 
 		requireThrows([&]() { scene.setSampleCount(0); }, "Scene accepted zero samples.");
 		requireThrows([&]() { scene.setAdaptiveMinSamples(0); }, "Scene accepted zero adaptive minimum samples.");
+		requireThrows(
+			[&]() { scene.setAdaptiveBackgroundMinSamples(-1); },
+			"Scene accepted negative adaptive background minimum samples."
+		);
+		requireThrows(
+			[&]() { scene.setAdaptiveVolumeMinSamples(-1); },
+			"Scene accepted negative adaptive volume minimum samples."
+		);
 		requireThrows([&]() { scene.setAdaptiveThreshold(0.0); }, "Scene accepted zero adaptive threshold.");
 		requireThrows([&]() { scene.setAdaptiveCheckInterval(0); }, "Scene accepted zero adaptive check interval.");
 		requireThrows([&]() { scene.setMaxLightBounces(-1); }, "Scene accepted negative max light bounces.");
@@ -4417,6 +4868,8 @@ namespace
 		requireThrows([&]() { conductor.setConductorFresnel(Color(0.0, 1.0, 1.0), Color(1.0, 1.0, 1.0)); }, "Metal accepted zero conductor eta.");
 		requireThrows([&]() { conductor.setConductorFresnel(Color(1.0, 1.0, 1.0), Color(-1.0, 1.0, 1.0)); }, "Metal accepted negative conductor k.");
 		requireThrows([&]() { HenyeyGreenstein(Color(1.0, 1.0, 1.0), 1.0); }, "Henyey-Greenstein material accepted invalid anisotropy.");
+		HenyeyGreenstein cloudPhase;
+		requireThrows([&]() { cloudPhase.setDropletPhase(4.0); }, "Cloud phase accepted an undersized droplet.");
 		requireThrows([&]() {
 			ConstantVolume(
 				std::make_shared<Sphere>(Vector3(0.0, 0.0, 0.0), 1.0, std::make_shared<Lambertian>(Color(0.0, 0.0, 0.0))),
@@ -4457,6 +4910,13 @@ namespace
 		const Color groundSky = dayAtmosphere.computeIncidentLight(groundUp, hitRecord, T_MAX);
 		requireFiniteNonNegativeColor(groundSky, "Ground atmosphere sky");
 		require(Utilities::luminance(groundSky) > 0.0, "Ground atmosphere sky is black.");
+		const Color groundSkyLinearSRGB = ColorManagement::linearSRGBFromACEScg(groundSky);
+		require(
+			groundSkyLinearSRGB.getRed() > 0.0
+			&& groundSkyLinearSRGB.getBlue() > groundSkyLinearSRGB.getGreen()
+			&& groundSkyLinearSRGB.getGreen() > groundSkyLinearSRGB.getRed(),
+			"Day atmosphere lost its positive red channel or physical blue-sky ordering."
+		);
 
 		const Color nightSky = nightAtmosphere.computeIncidentLight(groundUp, hitRecord, T_MAX);
 		requireFiniteNonNegativeColor(nightSky, "Night atmosphere sky");
@@ -4497,6 +4957,7 @@ namespace
 
 		Ray surfaceRay(Vector3(0.0, 0.0, -4.0), Vector3(0.0, 0.0, 1.0));
 		const AtmosphereSample surfaceSample = atmosphere.sampleSegment(surfaceRay, 3.0);
+		const Color transmittanceOnly = atmosphere.sampleTransmittance(surfaceRay, 3.0);
 		requireFiniteNonNegativeColor(surfaceSample.inScattering, "Atmosphere segment in-scattering");
 		requireFiniteNonNegativeColor(surfaceSample.transmittance, "Atmosphere segment transmittance");
 		require(Utilities::luminance(surfaceSample.inScattering) > 0.0, "Atmosphere segment did not add in-scattering.");
@@ -4504,6 +4965,7 @@ namespace
 		require(surfaceSample.transmittance.getGreen() <= 1.0, "Atmosphere green transmittance exceeds one.");
 		require(surfaceSample.transmittance.getBlue() <= 1.0, "Atmosphere blue transmittance exceeds one.");
 		require(surfaceSample.transmittance.getBlue() < 1.0, "Atmosphere segment did not attenuate the view ray.");
+		requireColorNear(transmittanceOnly, surfaceSample.transmittance, "Fast atmosphere transmittance");
 
 		HitRecord hitRecord;
 		requireColorNear(
@@ -4520,6 +4982,36 @@ namespace
 		requireNear(emptySample.transmittance.getRed(), 1.0, "Empty atmosphere segment red transmittance should be one.");
 		requireNear(emptySample.transmittance.getGreen(), 1.0, "Empty atmosphere segment green transmittance should be one.");
 		requireNear(emptySample.transmittance.getBlue(), 1.0, "Empty atmosphere segment blue transmittance should be one.");
+	}
+
+	void	testAtmosphereDiffuseSkyRadianceCache(void)
+	{
+		Atmosphere atmosphere(0.0, 6360000.0, 6420000.0, 7994.0, 1200.0, 8, 4, 0.0);
+		const Vector3 cameraPosition(0.0, 6360120.0, 0.0);
+		const Color first = atmosphere.sampleDiffuseSkyRadiance(cameraPosition);
+		const Color cached = atmosphere.sampleDiffuseSkyRadiance(cameraPosition);
+		requireFiniteNonNegativeColor(first, "Diffuse atmosphere control");
+		require(Utilities::luminance(first) > 0.0, "Diffuse atmosphere control is black during daytime.");
+		requireColorNear(cached, first, "Diffuse atmosphere cache changed a repeated query");
+
+		atmosphere.setSunRadianceScale(0.0);
+		const Color dark = atmosphere.sampleDiffuseSkyRadiance(cameraPosition);
+		requireColorNear(dark, Color(0.0, 0.0, 0.0), "Diffuse atmosphere cache was not invalidated");
+
+		Atmosphere original(0.0, 6360000.0, 6420000.0, 7994.0, 1200.0, 8, 4, 0.0);
+		const Color originalSky = original.sampleDiffuseSkyRadiance(cameraPosition);
+		Atmosphere darkCopy = original;
+		darkCopy.setSunRadianceScale(0.0);
+		requireColorNear(
+			darkCopy.sampleDiffuseSkyRadiance(cameraPosition),
+			Color(0.0, 0.0, 0.0),
+			"A copied atmosphere retained a stale diffuse-sky cache"
+		);
+		requireColorNear(
+			original.sampleDiffuseSkyRadiance(cameraPosition),
+			originalSky,
+			"Mutating an atmosphere copy changed the original diffuse-sky cache"
+		);
 	}
 
 	void	testAtmosphereMetersPerUnitPreservesPhysicalScale(void)
@@ -4620,6 +5112,14 @@ namespace
 		Scene scene;
 
 		require(scene.getAdaptiveSampling(), "Adaptive sampling is not enabled by default.");
+		require(
+			scene.getAdaptiveBackgroundMinSamples() == 0,
+			"Adaptive background minimum should inherit by default."
+		);
+		require(
+			scene.getAdaptiveVolumeMinSamples() == 0,
+			"Adaptive volume minimum should inherit by default."
+		);
 		require(scene.getDenoise(), "Denoising is not enabled by default.");
 	}
 
@@ -4676,6 +5176,18 @@ namespace
 
 		require(Renderer::render(scene), "Post-processed visual render failed.");
 		requireImageIsDisplayable(*scene.getImage(), "Post-processed visual render");
+		const SceneRenderStats& stats = scene.getRenderStats();
+		require(stats.displayDiagnosticsValid, "Display render did not produce exposure diagnostics.");
+		require(
+			stats.displayLuminanceP01 <= stats.displayLuminanceP50
+			&& stats.displayLuminanceP50 <= stats.displayLuminanceP99,
+			"Display luminance diagnostics are not ordered."
+		);
+		require(
+			stats.displayClippedPixelFraction >= 0.0
+			&& stats.displayClippedPixelFraction <= 1.0,
+			"Display clipped-pixel diagnostic is outside its valid range."
+		);
 
 		bool redForegroundSurvived = false;
 		for (std::size_t y = 3; y <= 5; y++)
@@ -4964,9 +5476,10 @@ namespace
 		scene.getImage()->setWidth(2);
 		scene.getImage()->setHeight(2);
 		scene.getImage()->initialize();
-		scene.setSampleCount(4);
+		scene.setSampleCount(8);
 		scene.setAdaptiveSampling(true);
-		scene.setAdaptiveMinSamples(2);
+		scene.setAdaptiveMinSamples(6);
+		scene.setAdaptiveBackgroundMinSamples(2);
 		scene.setAdaptiveThreshold(0.5);
 		scene.setAdaptiveCheckInterval(1);
 		scene.setMaxLightBounces(1);
@@ -4979,6 +5492,14 @@ namespace
 		scene.addCamera(testPinholeCamera(Vector3(0.0, 0.0, 1.0), Vector3(0.0, 0.0, -1.0), 1.0));
 
 		require(Renderer::render(scene), "Tiny adaptive render failed.");
+		require(
+			!scene.getRenderStats().displayDiagnosticsValid,
+			"Raw render incorrectly reported display exposure diagnostics."
+		);
+		require(
+			scene.getRenderStats().renderedSamples == 8,
+			"Stable background did not stop at its two-sample adaptive floor."
+		);
 		for (std::size_t y = 0; y < scene.getImage()->getHeight(); y++)
 		{
 			for (std::size_t x = 0; x < scene.getImage()->getWidth(); x++)
@@ -4988,6 +5509,63 @@ namespace
 				requireNear(pixel.getRed(), 0.1, "Tiny adaptive render changed stable background red.");
 			}
 		}
+	}
+
+	void	testAdaptiveVolumeMinimumSamples(void)
+	{
+		setRandomSeed(4242);
+
+		Scene scene;
+		scene.getImage()->setWidth(1);
+		scene.getImage()->setHeight(1);
+		scene.getImage()->initialize();
+		scene.setSampleCount(8);
+		scene.setAdaptiveSampling(true);
+		scene.setAdaptiveMinSamples(2);
+		scene.setAdaptiveBackgroundMinSamples(2);
+		scene.setAdaptiveVolumeMinSamples(8);
+		scene.setAdaptiveThreshold(0.5);
+		scene.setAdaptiveCheckInterval(1);
+		scene.setMaxLightBounces(1);
+		scene.setViewTransform(ViewTransform::Raw);
+		scene.setBloom(false);
+		scene.setDenoise(false);
+		scene.setRenderSky(SKY_NONE);
+		scene.setBackgroundColor(Color(0.1, 0.2, 0.3));
+		scene.setRenderingThreads(1);
+		scene.setBenchmarkMode(true);
+		scene.setVolumeGuidingTrainingSamples(16);
+		scene.setVolumeGuidingResolution(2);
+		scene.setVolumeGuidingLobes(8);
+		scene.setVolumeGuidingStrength(0.25);
+		scene.addCamera(testPinholeCamera(
+			Vector3(0.0, 0.0, 5.0),
+			Vector3(0.0, 0.0, -1.0),
+			5.0
+		));
+
+		CloudParameters parameters = CloudVolume::preset(CloudType::Stratus);
+		parameters.position = Vector3(0.0, 0.0, 0.0);
+		parameters.size = Vector3(8.0, 8.0, 8.0);
+		parameters.coverage = 1.0;
+		parameters.extinction = 2.0;
+		parameters.featureScale = 2.0;
+		parameters.detail = 0.0;
+		parameters.erosion = 0.0;
+		parameters.maxTrackingSteps = 64;
+		scene.addHittable(std::make_shared<CloudVolume>(parameters));
+
+		require(Renderer::render(scene), "Adaptive volume-floor render failed.");
+		require(
+			scene.getVolumeGuidingField() && scene.getVolumeGuidingField()->isFrozen(),
+			"Volume guiding prepass did not produce a frozen render-time field."
+		);
+		require(scene.getRenderStats().volumeGuideMS > 0.0,
+			"Volume guiding prepass time was not reported.");
+		require(
+			scene.getRenderStats().renderedSamples == 8,
+			"Cloud pixel did not retain the configured eight-sample volume floor."
+		);
 	}
 
 	void	testNFORDoesNotSpreadIsolatedFirefly(void)
@@ -5026,6 +5604,162 @@ namespace
 		require(
 			Utilities::luminance(neighborPixel) < 0.5,
 			"NFOR spread an isolated firefly into a neighbor."
+		);
+	}
+
+	void	testNFORVolumeResidualReconstructionRemovesCheckerVariance(void)
+	{
+		Denoise::NFORBuffers buffers;
+
+		buffers.initialize(9, 9);
+		for (std::size_t y = 0; y < buffers.height; y++)
+		{
+			for (std::size_t x = 0; x < buffers.width; x++)
+			{
+				const std::size_t index = buffers.index(x, y);
+				const double checker = ((x + y) % 2 == 0) ? 1.0 : 0.0;
+				buffers.colorA[index] = Color(checker, checker, checker);
+				buffers.colorB[index] = Color(checker, checker, checker);
+				buffers.colorVariance[index] = 0.25;
+				buffers.deterministicColor[index] = Color(0.2, 0.2, 0.2);
+				buffers.featuresA[index][0] = static_cast<double>(x) / 8.0;
+				buffers.featuresA[index][1] = static_cast<double>(y) / 8.0;
+				buffers.featuresA[index][2] = 1.0;
+				buffers.featuresA[index][3] = 0.5;
+				buffers.featuresA[index][4] = 0.5;
+				buffers.featuresA[index][5] = 1.0;
+				buffers.featuresA[index][6] = 0.5;
+				buffers.featuresA[index][10] = static_cast<double>(HENYEY_GREENSTEIN)
+					/ static_cast<double>(PRINCIPLED);
+				buffers.featuresB[index] = buffers.featuresA[index];
+			}
+		}
+
+		Denoise::NFORSettings settings;
+		settings.threadCount = 1;
+		std::unique_ptr<Image> denoised = Denoise::applyNFOR(buffers, settings);
+		const double center = Utilities::luminance(denoised->getPixel(4, 4));
+		const double neighbor = Utilities::luminance(denoised->getPixel(5, 4));
+
+		require(std::isfinite(center) && std::isfinite(neighbor), "Volume residual reconstruction produced non-finite radiance.");
+		require(
+			std::fabs(center - neighbor) < 0.12,
+			"Volume residual reconstruction retained coherent checker variance."
+		);
+		require(
+			center > 0.25 && center < 0.75,
+			"Volume residual reconstruction did not preserve the diffuse mean."
+		);
+	}
+
+	void	testNFORVolumeDensityGuidePreservesBillowBoundary(void)
+	{
+		Denoise::NFORBuffers buffers;
+
+		buffers.initialize(15, 9);
+		for (std::size_t y = 0; y < buffers.height; y++)
+		{
+			for (std::size_t x = 0; x < buffers.width; x++)
+			{
+				const std::size_t index = buffers.index(x, y);
+				const bool denseBillow = x >= 7;
+				const double target = denseBillow ? 0.78 : 0.22;
+				const double noise = ((x + y) % 2 == 0) ? 0.18 : -0.18;
+				const double sample = target + noise;
+
+				buffers.colorA[index] = Color(sample, sample, sample);
+				buffers.colorB[index] = Color(sample, sample, sample);
+				buffers.colorVariance[index] = 0.08;
+				buffers.deterministicColor[index] = Color(0.1, 0.1, 0.1);
+				buffers.volumeOpacity[index] = denseBillow ? 0.92 : 0.18;
+				buffers.featuresA[index][0] = static_cast<double>(x) / 14.0;
+				buffers.featuresA[index][1] = static_cast<double>(y) / 8.0;
+				buffers.featuresA[index][2] = 1.0;
+				buffers.featuresA[index][3] = 0.5;
+				buffers.featuresA[index][4] = 0.5;
+				buffers.featuresA[index][5] = 1.0;
+				buffers.featuresA[index][6] = 0.5;
+				buffers.featuresA[index][7] = denseBillow ? 0.85 : 0.15;
+				buffers.featuresA[index][10] = static_cast<double>(HENYEY_GREENSTEIN)
+					/ static_cast<double>(PRINCIPLED);
+				buffers.featuresB[index] = buffers.featuresA[index];
+			}
+		}
+
+		Denoise::NFORSettings settings;
+		settings.threadCount = 1;
+		std::unique_ptr<Image> denoised = Denoise::applyNFOR(buffers, settings);
+		double thinMean = 0.0;
+		double thickMean = 0.0;
+		for (std::size_t y = 2; y <= 6; y++)
+		{
+			for (std::size_t x = 4; x <= 6; x++)
+				thinMean += Utilities::luminance(denoised->getPixel(x, y));
+			for (std::size_t x = 7; x <= 9; x++)
+				thickMean += Utilities::luminance(denoised->getPixel(x, y));
+		}
+		thinMean /= 15.0;
+		thickMean /= 15.0;
+		require(
+			thickMean - thinMean > 0.38,
+			"Volume density guide blurred a thin-to-thick billow boundary."
+		);
+		require(
+			std::fabs(denoised->getPixel(5, 4).getRed()
+				- denoised->getPixel(5, 5).getRed()) < 0.16,
+			"Volume density guide preserved checker variance inside a billow."
+		);
+	}
+
+	void	testNFORPreservesConvergedVolumeDetail(void)
+	{
+		Denoise::NFORBuffers buffers;
+
+		buffers.initialize(9, 9);
+		for (std::size_t y = 0; y < buffers.height; y++)
+		{
+			for (std::size_t x = 0; x < buffers.width; x++)
+			{
+				const std::size_t index = buffers.index(x, y);
+				const double detail = x % 2 == 0 ? 0.20 : 0.40;
+
+				buffers.colorA[index] = Color(detail, detail, detail);
+				buffers.colorB[index] = Color(detail, detail, detail);
+				buffers.colorVariance[index] = 1e-8;
+				buffers.sampleCount[index] = 128u;
+				buffers.deterministicColor[index] = Color(0.1, 0.1, 0.1);
+				buffers.volumeOpacity[index] = 0.6;
+				buffers.featuresA[index][0] = static_cast<double>(x) / 8.0;
+				buffers.featuresA[index][1] = static_cast<double>(y) / 8.0;
+				buffers.featuresA[index][2] = 1.0;
+				buffers.featuresA[index][3] = 0.5;
+				buffers.featuresA[index][4] = 0.5;
+				buffers.featuresA[index][5] = 1.0;
+				buffers.featuresA[index][6] = 0.5;
+				buffers.featuresA[index][7] = 0.6;
+				buffers.featuresA[index][10] = static_cast<double>(HENYEY_GREENSTEIN)
+					/ static_cast<double>(PRINCIPLED);
+				buffers.featuresB[index] = buffers.featuresA[index];
+			}
+		}
+
+		Denoise::NFORSettings settings;
+		settings.threadCount = 1;
+		std::unique_ptr<Image> denoised = Denoise::applyNFOR(buffers, settings);
+		const double darkDetail = denoised->getPixel(4, 4).getRed();
+		const double brightDetail = denoised->getPixel(5, 4).getRed();
+
+		requireNearTolerance(
+			darkDetail,
+			0.20,
+			0.02,
+			"Volume denoiser blurred a converged dark density feature."
+		);
+		requireNearTolerance(
+			brightDetail,
+			0.40,
+			0.02,
+			"Volume denoiser blurred a converged bright density feature."
 		);
 	}
 
@@ -5097,6 +5831,703 @@ namespace
 		requireThrows([&]() { camera.setApertureDiameterMeters(0.0); }, "Camera accepted zero aperture diameter.");
 		requireThrows([&]() { camera.setFocusDistanceMeters(0.0); }, "Camera accepted zero focus distance.");
 	}
+
+	void	testSparseVolumeGridRoundTripAndInterpolation(void)
+	{
+		const std::filesystem::path path = std::filesystem::temp_directory_path()
+			/ "luz_sparse_volume_grid_test.luzvol";
+		SparseVolumeGrid::SourceBrick left;
+		left.x = 0;
+		left.density.fill(1.0f);
+		SparseVolumeGrid::SourceBrick right;
+		right.x = 1;
+		right.density.fill(0.5f);
+		SparseVolumeGrid::write(
+			path.string(),
+			{16u, 8u, 8u},
+			{-4, 7, 11},
+			{0.25f, 0.5f, 1.0f},
+			{left, right}
+		);
+
+		const SparseVolumeGrid grid = SparseVolumeGrid::load(path.string());
+		require(grid.brickCount() == 2, "Sparse volume did not preserve its nonempty bricks.");
+		require(grid.dimensions() == std::array<std::uint32_t, 3>{16u, 8u, 8u}, "Sparse volume dimensions changed.");
+		require(grid.indexMinimum() == std::array<std::int32_t, 3>{-4, 7, 11}, "Sparse volume index origin changed.");
+		requireNear(grid.maximumDensity(), 1.0, "Sparse volume maximum density changed.");
+		requireNear(
+			grid.sample(Vector3(3.5 / 16.0, 3.5 / 8.0, 3.5 / 8.0)),
+			1.0,
+			"Sparse volume did not reconstruct a brick sample."
+		);
+		requireNearTolerance(
+			grid.sample(Vector3(8.0 / 16.0, 3.5 / 8.0, 3.5 / 8.0)),
+			0.75,
+			2e-5,
+			"Sparse volume interpolation did not cross a brick boundary."
+		);
+		requireNear(grid.interpolationBrickMaximum(0, 0, 0), 1.0, "Sparse volume interpolation majorant is wrong.");
+		requireNear(grid.interpolationBrickMinimum(0, 0, 0), 0.0, "Sparse volume interpolation minimum is wrong.");
+		float cachedMinimum = -1.0f;
+		float cachedMaximum = -1.0f;
+		grid.interpolationBrickBounds(0, 0, 0, cachedMinimum, cachedMaximum);
+		requireNear(cachedMinimum, 0.0, "Combined sparse-volume interpolation minimum is wrong.");
+		requireNear(cachedMaximum, 1.0, "Combined sparse-volume interpolation maximum is wrong.");
+		grid.interpolationBrickBounds(-1, 0, 0, cachedMinimum, cachedMaximum);
+		requireNear(cachedMinimum, 0.0, "Out-of-bounds interpolation minimum is not conservative.");
+		requireNear(cachedMaximum, 1.0, "Out-of-bounds interpolation maximum lost its adjacent brick halo.");
+		requireNear(grid.sample(Vector3(-0.1, 0.5, 0.5)), 0.0, "Sparse volume sampled outside its bounds.");
+
+		GridVolumeParameters parameters;
+		parameters.fileName = path.string();
+		parameters.size = Vector3(16.0, 8.0, 8.0);
+		parameters.extinction = 0.5;
+		parameters.albedo = Color(0.2, 0.3, 0.4);
+		parameters.dropletSizeMicrons = 0.0;
+		SparseGridVolume volume(parameters);
+		requireNear(
+			volume.extinctionAt(Vector3(-4.5, -0.5, -0.5)),
+			0.5,
+			"Grid volume extinction did not sample the sparse field."
+		);
+		GridVolumeParameters remappedParameters = parameters;
+		remappedParameters.densityThreshold = 0.5;
+		remappedParameters.densityGamma = 2.0;
+		SparseGridVolume remappedVolume(remappedParameters);
+		requireNear(
+			remappedVolume.densityAt(Vector3(-4.5, -0.5, -0.5)),
+			1.0,
+			"Grid density remap changed the asset peak."
+		);
+		requireNear(
+			remappedVolume.densityAt(Vector3(4.5, -0.5, -0.5)),
+			0.0,
+			"Grid density threshold did not remove material at the cutoff."
+		);
+		requireNearTolerance(
+			remappedVolume.densityAt(Vector3(0.0, -0.5, -0.5)),
+			0.25,
+			1e-6,
+			"Grid density gamma did not reshape an interpolated density."
+		);
+		GridVolumeParameters invalidThresholdParameters = parameters;
+		invalidThresholdParameters.densityThreshold = 1.0;
+		requireThrows(
+			[&invalidThresholdParameters]() {
+				SparseGridVolume invalid(invalidThresholdParameters);
+				(void)invalid;
+			},
+			"Grid volume accepted a unit density threshold."
+		);
+		GridVolumeParameters invalidGammaParameters = parameters;
+		invalidGammaParameters.densityGamma = 0.0;
+		requireThrows(
+			[&invalidGammaParameters]() {
+				SparseGridVolume invalid(invalidGammaParameters);
+				(void)invalid;
+			},
+			"Grid volume accepted zero density gamma."
+		);
+		Sampler::beginPixelSample(8, 3, 0);
+		Sampler::setBounce(0);
+		Sampler::setFeatureSampling(true);
+		Ray gridFeatureRay(Vector3(-10.0, -0.5, -0.5), Vector3(1.0, 0.0, 0.0));
+		HitRecord gridFeatureHit;
+		require(
+			volume.hit(gridFeatureRay, gridFeatureHit, T_MIN, T_MAX),
+			"Sparse grid produced no deterministic feature hit."
+		);
+		require(
+			gridFeatureHit.u > parameters.albedo.getRed() && gridFeatureHit.u <= 1.0,
+			"Sparse-grid feature hit stored albedo instead of deterministic density."
+		);
+		Sampler::setFeatureSampling(false);
+		Sampler::endPixelSample();
+		Ray shadowRay(Vector3(-10.0, -0.5, -0.5), Vector3(1.0, 0.0, 0.0));
+		const Color transmittance = volume.shadowTransmittance(shadowRay, 0.0, 100.0);
+		requireNearTolerance(
+			transmittance.getRed(),
+			std::exp(-6.0),
+			2e-5,
+			"Grid volume brick traversal integrated the wrong optical depth."
+		);
+		Ray insideRightRay(Vector3(0.0, -0.5, -0.5), Vector3(1.0, 0.0, 0.0));
+		double insideEntry = -1.0;
+		double insideExit = -1.0;
+		require(
+			volume.integrationInterval(insideRightRay, 0.0, 100.0, insideEntry, insideExit),
+			"Grid volume rejected a ray whose origin is inside the medium."
+		);
+		requireNear(insideEntry, 0.0, "Inside-volume integration did not begin at the camera.");
+		requireNear(insideExit, 8.0, "Inside-volume integration ended at the wrong boundary.");
+		const Color insideRightTransmittance = volume.shadowTransmittance(
+			insideRightRay,
+			0.0,
+			100.0
+		);
+		requireNearTolerance(
+			insideRightTransmittance.getRed(),
+			std::exp(-2.0),
+			2e-5,
+			"Inside-volume traversal integrated the wrong forward optical depth."
+		);
+		Ray insideLeftRay(Vector3(0.0, -0.5, -0.5), Vector3(-1.0, 0.0, 0.0));
+		const Color insideLeftTransmittance = volume.shadowTransmittance(
+			insideLeftRay,
+			0.0,
+			100.0
+		);
+		requireNearTolerance(
+			insideLeftTransmittance.getRed(),
+			std::exp(-4.0),
+			2e-5,
+			"Inside-volume traversal integrated the wrong reverse optical depth."
+		);
+		Ray outsideMissRay(Vector3(20.0, -0.5, -0.5), Vector3(1.0, 0.0, 0.0));
+		requireNear(
+			volume.shadowTransmittance(outsideMissRay, 0.0, 100.0).getRed(),
+			1.0,
+			"A ray pointing away from an authored volume was attenuated."
+		);
+		GridVolumeParameters rotatedParameters = parameters;
+		rotatedParameters.rotationDegrees = Vector3(0.0, 0.0, 90.0);
+		SparseGridVolume rotatedVolume(rotatedParameters);
+		GridVolumeParameters invalidRotationParameters = parameters;
+		invalidRotationParameters.rotationDegrees = Vector3(
+			std::numeric_limits<double>::quiet_NaN(),
+			0.0,
+			0.0
+		);
+		requireThrows(
+			[&invalidRotationParameters]() {
+				SparseGridVolume invalid(invalidRotationParameters);
+				(void)invalid;
+			},
+			"Grid volume accepted a non-finite rotation."
+		);
+		requireNear(
+			rotatedVolume.extinctionAt(Vector3(0.5, -4.5, -0.5)),
+			0.5,
+			"Rotated grid volume did not transform world-space density lookup."
+		);
+		AABB rotatedBounds;
+		require(rotatedVolume.createBoundingBox(rotatedBounds), "Rotated grid volume has no bounds.");
+		requireVectorNear(rotatedBounds.getMinimum(), Vector3(-4.0, -8.0, -4.0), "Rotated grid minimum bounds");
+		requireVectorNear(rotatedBounds.getMaximum(), Vector3(4.0, 8.0, 4.0), "Rotated grid maximum bounds");
+		Ray rotatedShadowRay(Vector3(0.5, -10.0, -0.5), Vector3(0.0, 1.0, 0.0));
+		requireNearTolerance(
+			rotatedVolume.shadowTransmittance(rotatedShadowRay, 0.0, 100.0).getRed(),
+			std::exp(-6.0),
+			2e-5,
+			"Rotated grid brick traversal changed optical depth."
+		);
+		double originalDepth = 0.0;
+		double rotatedDepth = 0.0;
+		require(
+			volume.directionalOpticalDepth(
+				Vector3(-4.5, -0.5, -0.5),
+				Vector3(1.0, 0.0, 0.0),
+				originalDepth
+			),
+			"Unrotated grid did not build directional optical depth."
+		);
+		require(
+			rotatedVolume.directionalOpticalDepth(
+				Vector3(0.5, -4.5, -0.5),
+				Vector3(0.0, 1.0, 0.0),
+				rotatedDepth
+			),
+			"Rotated grid did not build directional optical depth."
+		);
+		requireNearTolerance(
+			rotatedDepth,
+			originalDepth,
+			1e-6,
+			"Rotation changed equivalent cached directional optical depth."
+		);
+		GridVolumeParameters ratioParameters = parameters;
+		ratioParameters.extinction = 1.0 / 12.0;
+		SparseGridVolume ratioVolume(ratioParameters);
+		double ratioMean = 0.0;
+		constexpr std::uint32_t ratioSampleCount = 4096;
+		for (std::uint32_t sample = 0; sample < ratioSampleCount; sample++)
+		{
+			Sampler::beginPixelSample(17, 23, sample);
+			Ray ratioRay(Vector3(-10.0, -0.5, -0.5), Vector3(1.0, 0.0, 0.0));
+			ratioMean += ratioVolume.shadowTransmittance(ratioRay, 0.0, 100.0).getRed();
+			Sampler::endPixelSample();
+		}
+		ratioMean /= static_cast<double>(ratioSampleCount);
+		requireNearTolerance(
+			ratioMean,
+			std::exp(-1.0),
+			0.03,
+			"Grid volume residual ratio tracking did not converge to Beer-Lambert transmittance."
+		);
+
+		const std::filesystem::path uniformPath = std::filesystem::temp_directory_path()
+			/ "luz_sparse_volume_uniform_control_test.luzvol";
+		std::vector<SparseVolumeGrid::SourceBrick> uniformBricks;
+		for (std::int32_t z = 0; z < 3; z++)
+			for (std::int32_t y = 0; y < 3; y++)
+				for (std::int32_t x = 0; x < 3; x++)
+				{
+					SparseVolumeGrid::SourceBrick brick;
+					brick.x = x;
+					brick.y = y;
+					brick.z = z;
+					brick.density.fill(1.0f);
+					uniformBricks.push_back(brick);
+				}
+		SparseVolumeGrid::write(
+			uniformPath.string(),
+			{24u, 24u, 24u},
+			{0, 0, 0},
+			{1.0f, 1.0f, 1.0f},
+			uniformBricks
+		);
+		const SparseVolumeGrid uniformGrid = SparseVolumeGrid::load(uniformPath.string());
+		requireNear(
+			uniformGrid.interpolationBrickMinimum(1, 1, 1),
+			1.0,
+			"Uniform interior brick did not preserve its conservative density minimum."
+		);
+		GridVolumeParameters uniformParameters;
+		uniformParameters.fileName = uniformPath.string();
+		uniformParameters.size = Vector3(24.0, 24.0, 24.0);
+		uniformParameters.extinction = 0.25;
+		uniformParameters.dropletSizeMicrons = 0.0;
+		uniformParameters.primaryDetail = 4.0;
+		SparseGridVolume uniformVolume(uniformParameters);
+		for (std::uint32_t sample = 0; sample < 32; sample++)
+		{
+			Sampler::beginPixelSample(5, 7, sample);
+			Ray uniformRay(Vector3(-2.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+			const double estimate = uniformVolume.shadowTransmittance(
+				uniformRay,
+				0.0,
+				4.0
+			).getRed();
+			Sampler::endPixelSample();
+			requireNearTolerance(
+				estimate,
+				std::exp(-1.0),
+				1e-12,
+				"Residual ratio tracking was not zero-variance in a uniform interior."
+			);
+		}
+		auto numericalFullShadow = [&uniformVolume](const Ray& sourceRay)
+		{
+			double entry = 0.0;
+			double exit = 0.0;
+			require(
+				uniformVolume.integrationInterval(sourceRay, 0.0, 100.0, entry, exit),
+				"Directional cache reference ray missed the uniform medium."
+			);
+			entry = std::max(0.0, entry);
+			constexpr int integrationSteps = 32768;
+			const double stepT = (exit - entry) / static_cast<double>(integrationSteps);
+			const double rayLength = Utilities::vectorLength(sourceRay.getDirection());
+			double opticalDepth = 0.0;
+			for (int step = 0; step < integrationSteps; step++)
+			{
+				const double t = entry + (static_cast<double>(step) + 0.5) * stepT;
+				opticalDepth += uniformVolume.extinctionAt(sourceRay.pointAtRay(t))
+					* stepT * rayLength;
+			}
+			return (std::exp(-opticalDepth));
+		};
+		auto cachedFullShadow = [&uniformVolume](Ray ray, std::uint32_t sample)
+		{
+			Sampler::beginPixelSample(211, 19, sample);
+			Sampler::setVolumeControlSampling(true);
+			const double transmittance = uniformVolume.shadowTransmittance(
+				ray,
+				0.0,
+				100.0
+			).getRed();
+			Sampler::setVolumeControlSampling(false);
+			Sampler::endPixelSample();
+			return (transmittance);
+		};
+		auto cachedDirectionalFullShadow = [&uniformVolume](Ray ray, std::uint32_t sample)
+		{
+			Sampler::beginPixelSample(212, 19, sample);
+			require(
+				!Sampler::isDirectionalShadowSampling(),
+				"Directional shadow state leaked between pixel samples."
+			);
+			Sampler::setDirectionalShadowSampling(true);
+			const double transmittance = uniformVolume.shadowTransmittance(
+				ray,
+				0.0,
+				100.0
+			).getRed();
+			Sampler::setDirectionalShadowSampling(false);
+			Sampler::endPixelSample();
+			return (transmittance);
+		};
+		Ray cachedPositiveRay(Vector3(-2.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+		const double cachedPositive = cachedFullShadow(cachedPositiveRay, 0);
+		double exposedPositiveDepth = 0.0;
+		require(
+			uniformVolume.directionalOpticalDepth(
+				Vector3(-2.0, 0.0, 0.0),
+				Vector3(1.0, 0.0, 0.0),
+				exposedPositiveDepth
+			),
+			"Sparse volume did not expose its directional optical depth."
+		);
+		requireNearTolerance(
+			exposedPositiveDepth,
+			3.5,
+			0.02,
+			"Exposed directional optical depth changed the cached integral."
+		);
+		requireNearTolerance(
+			cachedPositive,
+			numericalFullShadow(cachedPositiveRay),
+			0.006,
+			"Directional optical-depth cache changed a positive-axis shadow."
+		);
+		requireNearTolerance(
+			cachedFullShadow(cachedPositiveRay, 1),
+			cachedPositive,
+			1e-12,
+			"Directional optical-depth cache was not stable across repeated queries."
+		);
+		requireNearTolerance(
+			cachedDirectionalFullShadow(cachedPositiveRay, 17),
+			cachedPositive,
+			1e-12,
+			"Directional-light shadow sampling did not use the optical-depth cache."
+		);
+		requireNearTolerance(
+			cachedDirectionalFullShadow(cachedPositiveRay, 29),
+			cachedPositive,
+			1e-12,
+			"Directional-light cache result changed with the stochastic sample."
+		);
+		Ray cachedNegativeRay(Vector3(2.0, 0.0, 0.0), Vector3(-1.0, 0.0, 0.0));
+		requireNearTolerance(
+			cachedFullShadow(cachedNegativeRay, 2),
+			numericalFullShadow(cachedNegativeRay),
+			0.006,
+			"Directional optical-depth cache changed an opposite-direction shadow."
+		);
+		const Vector3 diagonalDirection(1.0, 0.37, -0.22);
+		Ray cachedDiagonalRay(
+			Vector3(0.0, 0.0, 0.0),
+			diagonalDirection / Utilities::vectorLength(diagonalDirection)
+		);
+		requireNearTolerance(
+			cachedFullShadow(cachedDiagonalRay, 3),
+			numericalFullShadow(cachedDiagonalRay),
+			0.012,
+			"Directional optical-depth cache changed a diagonal inside-volume shadow."
+		);
+		Sampler::beginPixelSample(213, 19, 0);
+		Sampler::setDirectionalShadowSampling(true);
+		Ray truncatedControlRay(Vector3(-2.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+		const double truncatedControl = uniformVolume.shadowTransmittance(
+			truncatedControlRay,
+			0.0,
+			4.0
+		).getRed();
+		Sampler::setDirectionalShadowSampling(false);
+		Sampler::endPixelSample();
+		requireNearTolerance(
+			truncatedControl,
+			std::exp(-1.0),
+			1e-12,
+			"Directional cache incorrectly replaced a finite directional-light segment."
+		);
+
+		const std::filesystem::path smoothPath = std::filesystem::temp_directory_path()
+			/ "luz_sparse_volume_smooth_control_test.luzvol";
+		std::vector<SparseVolumeGrid::SourceBrick> smoothBricks;
+		for (std::int32_t z = 0; z < 3; z++)
+			for (std::int32_t y = 0; y < 3; y++)
+				for (std::int32_t x = 0; x < 3; x++)
+				{
+					SparseVolumeGrid::SourceBrick brick;
+					brick.x = x;
+					brick.y = y;
+					brick.z = z;
+					for (std::uint32_t localZ = 0; localZ < SparseVolumeGrid::BRICK_EDGE; localZ++)
+						for (std::uint32_t localY = 0; localY < SparseVolumeGrid::BRICK_EDGE; localY++)
+							for (std::uint32_t localX = 0; localX < SparseVolumeGrid::BRICK_EDGE; localX++)
+							{
+								const std::size_t index = static_cast<std::size_t>(
+									(localZ * SparseVolumeGrid::BRICK_EDGE + localY)
+										* SparseVolumeGrid::BRICK_EDGE + localX
+								);
+								brick.density[index] = 0.75f + 0.10f
+									* static_cast<float>(localX)
+									/ static_cast<float>(SparseVolumeGrid::BRICK_EDGE - 1u);
+							}
+					smoothBricks.push_back(brick);
+				}
+		SparseVolumeGrid::write(
+			smoothPath.string(),
+			{24u, 24u, 24u},
+			{0, 0, 0},
+			{1.0f, 1.0f, 1.0f},
+			smoothBricks
+		);
+		GridVolumeParameters smoothParameters = uniformParameters;
+		smoothParameters.fileName = smoothPath.string();
+		SparseGridVolume smoothVolume(smoothParameters);
+		constexpr std::uint32_t varianceSampleCount = 4096;
+		double residualSum = 0.0;
+		double residualSquareSum = 0.0;
+		double ordinarySum = 0.0;
+		double ordinarySquareSum = 0.0;
+		for (std::uint32_t sample = 0; sample < varianceSampleCount; sample++)
+		{
+			Sampler::beginPixelSample(101, 7, sample);
+			Ray residualRay(Vector3(-2.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+			const double residualEstimate = smoothVolume.shadowTransmittance(
+				residualRay,
+				0.0,
+				4.0
+			).getRed();
+			Sampler::endPixelSample();
+			residualSum += residualEstimate;
+			residualSquareSum += residualEstimate * residualEstimate;
+
+			Sampler::beginPixelSample(103, 7, sample);
+			constexpr double densityMajorant = 0.85;
+			const double rate = smoothParameters.extinction * densityMajorant;
+			double eventT = 0.0;
+			double ordinaryEstimate = 1.0;
+			for (std::uint32_t event = 0; event < 1024; event++)
+			{
+				eventT += -std::log(std::max(
+					1e-12,
+					1.0 - Sampler::sample1D(0x72000000u + event)
+				)) / rate;
+				if (eventT >= 4.0)
+					break;
+				ordinaryEstimate *= std::clamp(
+					1.0 - smoothVolume.densityAt(Vector3(-2.0 + eventT, 0.0, 0.0))
+						/ densityMajorant,
+					0.0,
+					1.0
+				);
+			}
+			Sampler::endPixelSample();
+			ordinarySum += ordinaryEstimate;
+			ordinarySquareSum += ordinaryEstimate * ordinaryEstimate;
+		}
+		const double residualMean = residualSum / varianceSampleCount;
+		const double ordinaryMean = ordinarySum / varianceSampleCount;
+		const double residualVariance = residualSquareSum / varianceSampleCount
+			- residualMean * residualMean;
+		const double ordinaryVariance = ordinarySquareSum / varianceSampleCount
+			- ordinaryMean * ordinaryMean;
+		double opticalDepth = 0.0;
+		constexpr int referenceSteps = 4096;
+		for (int step = 0; step < referenceSteps; step++)
+		{
+			const double t = (static_cast<double>(step) + 0.5)
+				* 4.0 / static_cast<double>(referenceSteps);
+			opticalDepth += smoothParameters.extinction
+				* smoothVolume.densityAt(Vector3(-2.0 + t, 0.0, 0.0))
+				* 4.0 / static_cast<double>(referenceSteps);
+		}
+		const double smoothExpected = std::exp(-opticalDepth);
+		requireNearTolerance(
+			residualMean,
+			smoothExpected,
+			0.01,
+			"Residual ratio tracking changed the expected smooth-medium transmittance."
+		);
+		requireNearTolerance(
+			ordinaryMean,
+			smoothExpected,
+			0.025,
+			"Ordinary ratio-tracking comparison did not converge."
+		);
+		require(
+			residualVariance < ordinaryVariance * 0.1,
+			"Residual ratio tracking did not materially reduce smooth-medium variance."
+		);
+
+		const std::filesystem::path scenePath = std::filesystem::temp_directory_path()
+			/ "luz_sparse_volume_grid_scene_test.luz";
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[settings]\n"
+				<< "meters_per_unit=2\n\n"
+				<< "[scene]\n"
+				<< "volume_grid authored_cloud {\n"
+				<< "file=" << path.filename().string() << "\n"
+				<< "position=(1,2,3)\n"
+				<< "rotation=(0,0,90)\n"
+				<< "size=(16,8,8)\n"
+				<< "extinction=0.25\n"
+				<< "density_threshold=0.1\n"
+				<< "density_contrast=1.25\n"
+				<< "albedo=(0.98,0.99,1.0)\n"
+				<< "droplet_size=18\n"
+				<< "scatter_falloff=0.8\n"
+				<< "scatter_compensation=0.6\n"
+				<< "quality=final\n"
+				<< "}\n";
+		}
+		Scene scene;
+		SceneFile::read(scene, scenePath.string());
+		require(scene.getHittables().size() == 1, "Grid volume scene did not load one volume.");
+		const std::shared_ptr<SparseGridVolume> parsed = std::dynamic_pointer_cast<SparseGridVolume>(scene.getHittables()[0]);
+		require(parsed != nullptr, "volume_grid did not create a SparseGridVolume.");
+		requireVectorNear(parsed->getParameters().position, Vector3(1.0, 2.0, 3.0), "Grid volume position");
+		requireVectorNear(parsed->getParameters().rotationDegrees, Vector3(0.0, 0.0, 90.0), "Grid volume rotation");
+		require(parsed->getParameters().shadowSamplesPerBrick == 12, "Final grid volume shadow quality was not applied.");
+		requireNear(parsed->getParameters().primaryDetail, 8.0, "Final grid volume primary detail was not applied.");
+		requireNear(parsed->getParameters().densityThreshold, 0.1, "Grid volume density threshold was not parsed.");
+		requireNear(parsed->getParameters().densityGamma, 1.25, "Grid volume density contrast alias was not parsed.");
+		requireNear(
+			parsed->extinctionAt(Vector3(1.5, -2.5, 2.5)),
+			0.5,
+			"Remapped grid volume did not inherit meters_per_unit."
+		);
+		const HenyeyGreenstein* phase = dynamic_cast<const HenyeyGreenstein*>(parsed->getMaterial());
+		require(phase != nullptr && phase->usesDropletPhase(), "Grid volume did not enable the droplet phase model.");
+		requireNear(phase->getDropletSizeMicrons(), 18.0, "Grid volume droplet size was not parsed.");
+		{
+			std::ofstream sceneStream(scenePath);
+			sceneStream
+				<< "[scene]\n"
+				<< "volume_grid reference_cloud {\n"
+				<< "file=" << path.filename().string() << "\n"
+				<< "quality=reference\n"
+				<< "}\n";
+		}
+		Scene referenceScene;
+		SceneFile::read(referenceScene, scenePath.string());
+		const std::shared_ptr<SparseGridVolume> referenceVolume
+			= std::dynamic_pointer_cast<SparseGridVolume>(referenceScene.getHittables()[0]);
+		require(referenceVolume != nullptr, "Reference grid quality did not create a sparse volume.");
+		require(
+			referenceVolume->getParameters().shadowSamplesPerBrick == 16,
+			"Reference grid volume shadow quality was not applied."
+		);
+		requireNear(
+			referenceVolume->getParameters().primaryDetail,
+			16.0,
+			"Reference grid volume primary detail was not applied."
+		);
+		std::filesystem::remove(scenePath);
+		std::filesystem::remove(smoothPath);
+		std::filesystem::remove(uniformPath);
+		std::filesystem::remove(path);
+	}
+
+	void	testVolumeGuidingFieldTrainingAndSampling(void)
+	{
+		requireThrows(
+			[]() {
+				VolumeGuidingField invalid(
+					Vector3(0.0, 0.0, 0.0),
+					Vector3(0.0, 1.0, 1.0),
+					2
+				);
+			},
+			"Volume guiding accepted empty spatial bounds."
+		);
+		requireThrows(
+			[]() {
+				VolumeGuidingField invalid(
+					Vector3(-1.0, -1.0, -1.0),
+					Vector3(1.0, 1.0, 1.0),
+					0
+				);
+			},
+			"Volume guiding accepted zero spatial resolution."
+		);
+
+		const Vector3 minimum(-1.0, -1.0, -1.0);
+		const Vector3 maximum(1.0, 1.0, 1.0);
+		const Vector3 position(0.5, 0.5, 0.5);
+		const Vector3 brightDirection(1.0, 0.0, 0.0);
+		const Vector3 dimDirection(-1.0, 0.0, 0.0);
+		VolumeGuidingField forward(minimum, maximum, 2, 16, 0.8);
+		VolumeGuidingField reverse(minimum, maximum, 2, 16, 0.8);
+		require(!forward.isFrozen(), "A new volume guide was unexpectedly frozen.");
+		require(forward.cellCount() == 8, "Volume guide allocated the wrong number of cells.");
+		require(forward.memoryBytes() > 8 * 16 * sizeof(double),
+			"Volume guide memory accounting is too small.");
+
+		for (int sample = 0; sample < 100; sample++)
+			forward.record(position, brightDirection, 1.0);
+		for (int sample = 0; sample < 5; sample++)
+			forward.record(position, dimDirection, 1.0);
+		for (int sample = 0; sample < 5; sample++)
+			reverse.record(position, dimDirection, 1.0);
+		for (int sample = 0; sample < 100; sample++)
+			reverse.record(position, brightDirection, 1.0);
+		forward.record(Vector3(4.0, 4.0, 4.0), dimDirection, 100000.0);
+		forward.freeze(0.01);
+		reverse.freeze(0.01);
+		require(forward.isFrozen(), "Volume guide did not freeze after training.");
+		requireThrows(
+			[&]() { VolumeGuidingField copy(minimum, maximum, 1); copy.freeze(0.0); },
+			"Volume guide accepted a zero training prior."
+		);
+
+		const double brightPDF = forward.pdf(position, brightDirection);
+		const double dimPDF = forward.pdf(position, dimDirection);
+		require(std::isfinite(brightPDF) && brightPDF > 0.0,
+			"Learned volume guide returned an invalid PDF.");
+		require(brightPDF > dimPDF * 2.0,
+			"Volume guide did not learn the dominant incident direction.");
+		requireNearTolerance(
+			brightPDF,
+			reverse.pdf(position, brightDirection),
+			1e-12,
+			"Volume guide training changed with record order."
+		);
+		requireNear(
+			forward.pdf(Vector3(4.0, 4.0, 4.0), brightDirection),
+			0.0,
+			"Volume guide evaluated outside its bounds."
+		);
+
+		const VolumeGuidingField::Sample guided = forward.sample(
+			position,
+			0.5,
+			Sampler::Sample2D{0.25f, 0.75f}
+		);
+		require(guided.valid, "Frozen volume guide did not produce a direction sample.");
+		requireNearTolerance(
+			Utilities::vectorLengthSquared(guided.direction),
+			1.0,
+			1e-10,
+			"Volume guide sampled a non-unit direction."
+		);
+		requireNearTolerance(
+			guided.pdf,
+			forward.pdf(position, guided.direction),
+			1e-12,
+			"Volume guide sample and evaluation PDFs disagree."
+		);
+		require(
+			!forward.sample(Vector3(4.0, 4.0, 4.0), 0.5, {0.5f, 0.5f}).valid,
+			"Volume guide sampled outside its bounds."
+		);
+
+		const double frozenPDF = forward.pdf(position, brightDirection);
+		forward.record(position, dimDirection, 100000.0);
+		forward.freeze(10.0);
+		requireNearTolerance(
+			forward.pdf(position, brightDirection),
+			frozenPDF,
+			1e-12,
+			"Frozen volume guide changed after additional training."
+		);
+	}
 }
 
 int	main(void)
@@ -5132,6 +6563,7 @@ int	main(void)
 		testSceneFileDenoiseOutputName();
 		testSceneFileUsesSceneDefaults();
 		testSceneFileAdaptiveSettings();
+		testSceneFileVolumeGuidingSettings();
 		testSceneFilePostProcessSettings();
 		testSceneFileCausticSettings();
 		testSceneFilePhotographicExposureSetting();
@@ -5182,6 +6614,8 @@ int	main(void)
 		testPrincipledSubsurfaceControls();
 		testSceneFileLoadsNamedTexturedSphere();
 		testSceneFileLoadsVolumeBlock();
+		testSceneFileLoadsProceduralCloudBlock();
+		testSceneFileCloudAliasesAndQualityPrecedence();
 		testSceneFileMetersPerUnitScalesVolumeDensity();
 		testCausticPhotonMapBuildsAndEstimates();
 		testSceneFileLoadsNonMetallicPrincipledMaterial();
@@ -5191,6 +6625,8 @@ int	main(void)
 		testBVHReturnsClosestHit();
 		testVolumeHitWorksFromInsideBoundary();
 		testBoxVolumeHitWorksFromInsideBoundary();
+		testProceduralCloudDensityAndDeltaTracking();
+		testVolumeShadowTransmittance();
 		testTinyTriangleHitAndNormal();
 		testTrianglePDFAndRandomSampling();
 		testTriangleInterpolatesVertexNormals();
@@ -5218,6 +6654,7 @@ int	main(void)
 		testPlanetaryHitRobustIntersections();
 		testAtmosphereIncidentLightInsideOutsideAndSunPosition();
 		testAtmosphereSegmentTransmittance();
+		testAtmosphereDiffuseSkyRadianceCache();
 		testAtmosphereMetersPerUnitPreservesPhysicalScale();
 		testAtmospherePrimaryHitCompositesSurface();
 		testSceneDefaultsEnableAdaptiveAndDenoise();
@@ -5230,10 +6667,16 @@ int	main(void)
 		testTinyRender();
 		testAtmosphereCompositesEnvironmentBackground();
 		testTinyAdaptiveRender();
+		testAdaptiveVolumeMinimumSamples();
 		testNFORDoesNotSpreadIsolatedFirefly();
+		testNFORVolumeResidualReconstructionRemovesCheckerVariance();
+		testNFORVolumeDensityGuidePreservesBillowBoundary();
+		testNFORPreservesConvergedVolumeDetail();
 		testTinyAdaptiveDenoisedRender();
 		testTinyDenoisedRenderProducesCompanionImage();
 		testCameraRejectsInvalidPhysicalOptics();
+		testSparseVolumeGridRoundTripAndInterpolation();
+		testVolumeGuidingFieldTrainingAndSampling();
 		testEnvironmentBackgroundRender();
 	}
 	catch (const std::exception& exception)
