@@ -4,6 +4,7 @@
 #include "Ray/Ray.hpp"
 #include "Color.hpp"
 #include "Hittables/Hittable.hpp"
+#include <memory>
 
 struct	AtmosphereSample
 {
@@ -34,6 +35,11 @@ class   Atmosphere
 		double	metersToSceneUnits(double meters) const;
 		Color   computeIncidentLight(const Ray& ray, HitRecord& hitRecord, double t_max) const;
 		AtmosphereSample	sampleSegment(const Ray& ray, double t_max) const;
+		Color	sampleTransmittance(const Ray& ray, double t_max) const;
+		// Uniform-hemisphere mean radiance from the procedural sky. This is a
+		// deterministic low-frequency control for high-order volume scattering,
+		// not a replacement for sampled environment lighting.
+		Color	sampleDiffuseSkyRadiance(const Vector3& position) const;
 		double  getSunAngle(void) const;
 		void	setSunAngle(double newAngle);
 		void	setSunDirection(Vector3 sunDirection);
@@ -61,7 +67,10 @@ class   Atmosphere
 		int	 _lightSamples; // Number of samples per ray sample
 		double  _starsBrightness;
 		double	_metersPerUnit;
+		struct DiffuseSkyCache;
+		mutable std::shared_ptr<DiffuseSkyCache> _diffuseSkyCache;
 		void	updateSunDirectionVector(void);
+		void	invalidateDiffuseSkyCache(void);
 };
 
 bool planetaryHit(double radius, const Ray& ray, HitRecord& hitRecord);
