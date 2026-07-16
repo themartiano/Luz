@@ -33,6 +33,11 @@ struct	ScatterRecord
 	ONB	cosineBasis;
 	Vector3	phaseDirection;
 	double	phaseAnisotropy = 0.0;
+	double	phaseSecondaryAnisotropy = 0.0;
+	double	phasePrimaryWeight = 1.0;
+	bool	phaseUsesDraine = false;
+	double	phaseDraineAlpha = 0.0;
+	double	phaseDraineWeight = 0.0;
 	bool	hasMediumAbsorption = false;
 	Color	mediumAbsorptionCoefficient = Color(0.0, 0.0, 0.0);
 	bool	hasSubsurface = false;

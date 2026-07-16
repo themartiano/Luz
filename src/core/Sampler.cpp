@@ -22,6 +22,9 @@ namespace
 		std::uint32_t	sampleIndex = 0;
 		std::uint32_t	stream = 0;
 		std::uint32_t	bounce = 0;
+		bool	featureSampling = false;
+		bool	volumeControlSampling = false;
+		bool	directionalShadowSampling = false;
 		std::uint64_t	baseKey = 0;
 	};
 
@@ -117,10 +120,20 @@ namespace
 		return (
 			baseDimension == Sampler::DIM_CAMERA
 			|| baseDimension == Sampler::DIM_LENS
+			|| baseDimension == Sampler::DIM_LIGHT_STRATEGY
+			|| baseDimension == Sampler::DIM_BSDF_DIRECTION
+			|| baseDimension == Sampler::DIM_MATERIAL_DECISION
+			|| baseDimension == Sampler::DIM_RUSSIAN_ROULETTE
+			|| baseDimension == Sampler::DIM_VOLUME_DISTANCE
 			|| baseDimension == Sampler::DIM_LIGHT_SURFACE_SELECTION
 			|| baseDimension == Sampler::DIM_LIGHT_SURFACE_POINT
 			|| baseDimension == Sampler::DIM_ENVIRONMENT_SELECTION
 			|| baseDimension == Sampler::DIM_ENVIRONMENT_POINT
+			|| baseDimension == Sampler::DIM_ENVIRONMENT_STRATEGY
+			|| baseDimension == Sampler::DIM_VOLUME_GUIDING
+			|| baseDimension == Sampler::DIM_VOLUME_ACCEPTANCE
+			|| baseDimension == Sampler::DIM_VOLUME_LEARNED_LOBE
+			|| baseDimension == Sampler::DIM_VOLUME_LEARNED_DIRECTION
 			|| baseDimension == Sampler::DIM_LIGHT_EMISSION_DIRECTION
 		);
 	}
@@ -166,6 +179,9 @@ void	Sampler::beginPixelSample(std::size_t x, std::size_t y, std::uint32_t sampl
 	g_context.sampleIndex = sampleIndex;
 	g_context.stream = stream;
 	g_context.bounce = 0;
+	g_context.featureSampling = false;
+	g_context.volumeControlSampling = false;
+	g_context.directionalShadowSampling = false;
 	g_context.baseKey = g_renderSeed;
 	g_context.baseKey ^= (static_cast<std::uint64_t>(x) + 1ull) * 0xbf58476d1ce4e5b9ull;
 	g_context.baseKey ^= (static_cast<std::uint64_t>(y) + 1ull) * 0x94d049bb133111ebull;
@@ -178,6 +194,46 @@ void	Sampler::setBounce(std::uint32_t bounce)
 	{
 		g_context.bounce = bounce;
 	}
+}
+
+std::uint32_t Sampler::currentBounce(void)
+{
+	return (g_context.bounce);
+}
+
+void	Sampler::setFeatureSampling(bool enabled)
+{
+	if (g_context.active)
+	{
+		g_context.featureSampling = enabled;
+	}
+}
+
+bool	Sampler::isFeatureSampling(void)
+{
+	return (g_context.active && g_context.featureSampling);
+}
+
+void Sampler::setVolumeControlSampling(bool enabled)
+{
+	if (g_context.active)
+		g_context.volumeControlSampling = enabled;
+}
+
+bool Sampler::isVolumeControlSampling(void)
+{
+	return (g_context.active && g_context.volumeControlSampling);
+}
+
+void Sampler::setDirectionalShadowSampling(bool enabled)
+{
+	if (g_context.active)
+		g_context.directionalShadowSampling = enabled;
+}
+
+bool Sampler::isDirectionalShadowSampling(void)
+{
+	return (g_context.active && g_context.directionalShadowSampling);
 }
 
 void	Sampler::endPixelSample(void)
