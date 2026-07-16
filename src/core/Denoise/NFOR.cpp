@@ -100,6 +100,15 @@ namespace
 		}
 		return (luminance);
 	}
+	double	smoothStep(double edge0, double edge1, double value)
+	{
+		if (edge1 <= edge0)
+		{
+			return (value >= edge1 ? 1.0 : 0.0);
+		}
+		const double t = std::clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
+		return (t * t * (3.0 - 2.0 * t));
+	}
 
 	Color	medianColorByLuminance(std::vector<Color>& colors)
 	{
@@ -1091,6 +1100,18 @@ namespace
 							filterStrength = filterStrength * filterStrength
 								* (3.0 - 2.0 * filterStrength);
 						}
+						const double centerLuminance = colorLuminance(stochasticColor[center]);
+						const double shadowInterior = smoothStep(0.25, 0.75, centerOpacity)
+							* std::max(
+								1.0 - smoothStep(0.02, 0.12, centerGuide),
+								1.0 - smoothStep(0.015, 0.08, centerLuminance)
+							);
+						const double shadowMinimum = iteration == 0 ? 0.25
+							: (iteration == 1 ? 0.45 : 0.60);
+						filterStrength = std::max(
+							filterStrength,
+							shadowInterior * shadowMinimum
+						);
 						next[center] = current[center] * (1.0 - filterStrength)
 							+ filtered * filterStrength;
 					}
