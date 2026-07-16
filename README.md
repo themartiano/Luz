@@ -19,6 +19,13 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - Adaptive sampling
 - Denoiser (NFOR-style)
 - Spheres, planes, rectangles, triangles, cubes, volumes, and OBJ meshes
+- Path-traced heterogeneous procedural clouds with hierarchical hero thermals,
+  multi-scale cauliflower detail, wind-sheared crowns, cloud-bank composition,
+  and cumulus, stratocumulus, stratus, cirrus, and cumulonimbus presets
+- Dependency-free `.luzvol` sparse authored volumes with trilinear sampling,
+  empty-space traversal, local-majorant delta/residual-ratio tracking,
+  bounded-memory swept directional optical-depth caches, and an optional offline
+  VDB converter that is never linked into Luz
 - Scene-linear ACEScg rendering with sRGB input/output transforms
 - Spectral authoring helpers: wavelength, blackbody, solar, and reflectance curves
 - Lambertian, GGX metal, rough dielectric, layered principled with subsurface
@@ -30,6 +37,8 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - .blend to .luz converter
 - Fully customizable render parameters via CLI or scene file
 - Importance sampling with PDFs, MIS, and optional caustic photon mapping
+- Optional deterministic two-phase volume path guiding with frozen spatial
+  radiance cells and exact learned/physical/sun/sky mixture PDFs
 - BVH acceleration, including packed mesh BVHs with binned SAH construction and near-first traversal
 - Atmospheric simulation w/ scattering
 - Physical camera focal length, sensor size, aperture/f-stop, focus distance,
@@ -68,6 +77,53 @@ The volumetric fog and godrays sample is:
 ```sh
 ./luz --file examples/scenes/volumetric_godrays.luz --threads 8
 ```
+
+The atmospheric procedural-cloud sample is:
+
+```sh
+./luz examples/scenes/path-traced-clouds.luz --threads 8
+```
+
+The high-altitude layered cloudscape sample is:
+
+```sh
+./luz examples/scenes/path-traced-cloudscape.luz --threads 8
+```
+
+The authored Disney hero-cloud sample uses a locally converted asset:
+
+```sh
+tools/build-vdb-converter.sh /tmp/vdb-to-luzvol
+/tmp/vdb-to-luzvol wdas_cloud_half.vdb assets/volumes/wdas_cloud_half.luzvol density
+./luz examples/scenes/disney-cloud-hero-closeup.luz --threads 8
+```
+
+Use Disney's quarter-resolution field for fast look development and the
+half-resolution field used by the sample for final edge filaments and billow
+detail.
+
+`disney-cloud-hero-closeup.luz` is the practical hero-render configuration: it
+keeps the native dense Disney field and reconstructs low-frequency high-order
+scattering while the path tracer resolves the directional residual. For an
+unapproximated transport reference, `disney-cloud-reference.luz` uses full
+collision-depth extinction, 64 light bounces, and a 1024-spp budget. It is
+intentionally much slower and noisier until deeply converged.
+
+`disney-cloud-hero-closeup.luz` uses the field's broad native face and a tighter
+50 mm composition to fill a 1440x810 frame with one coherent cauliflower mass,
+deep self-shadow cavities, and a foreground bank that naturally leaves frame.
+Authored-grid rotation remains available as a runtime rigid transform when a
+different view is needed; Luz never resamples the `.luzvol`.
+
+The companion `disney-cloud-backlit.luz`, `disney-cloud-dusk.luz`, and
+`disney-cloud-interior.luz` scenes stress bright rims, low-angle warm light,
+opposite-side structure, and rays that begin inside occupied density. Their
+exposures were checked from scene-linear float TIFF output and the final ACES
+display output, including non-finite values, HDR highlight latitude, display
+clipping, and digital-black shadow counts.
+
+Only the optional offline converter needs OpenVDB. The `luz` and `luz_tests`
+targets remain zero-dependency C++20 builds.
 
 Run the test suite:
 
@@ -156,6 +212,10 @@ Options:
   --adaptive [true|false]     Toggle adaptive sampling (default: true)
   --no-adaptive               Disable adaptive sampling
   --adaptive-min-samples N    Minimum samples before adaptive stopping
+  --adaptive-background-min-samples N
+                               Background floor (0 inherits adaptive minimum)
+  --adaptive-volume-min-samples N
+                               Volume floor (0 inherits adaptive minimum)
   --adaptive-threshold F      Relative adaptive noise threshold
   --adaptive-check-interval N Adaptive convergence check interval
 	-mlb, --maxLightBounces N   Override maximum light bounces
@@ -238,10 +298,20 @@ Adaptive sampling is enabled by default. `--samples` is the maximum samples per
 pixel when adaptive stopping is active. Each pixel uses a progressive per-pixel
 sample sequence, renders at least
 `--adaptive-min-samples`, then periodically checks luminance and RGB confidence
-intervals. Very dark pixels use a conservative minimum before they can stop, so
+intervals. `--adaptive-background-min-samples` and
+`--adaptive-volume-min-samples` can move samples from deterministic sky into
+noisy cloud transport; zero keeps the global floor. Primary-ray guides and
+cloud opacity prevent thin wisps from being treated as empty background. Very
+dark surfaces and volumes use a conservative minimum before they can stop, so
 rare light contributions are less likely to be mistaken for converged black.
 Use `--no-adaptive` or `--adaptive false` to render every pixel for the full
 sample count.
+
+Display renders also report encoded-sRGB luminance percentiles and the fraction
+of pixels with a clipped channel after exposure and the view transform. These
+diagnostics make bright-sun, dusk, backlight, and interior exposure regressions
+visible in automated renders; raw scene-linear TIFF output intentionally omits
+them.
 
 Lower thresholds keep more detail and cost more time. For final renders, start
 with a high max sample count and tune with values like:
@@ -267,6 +337,14 @@ image can look almost unchanged or can smooth the wrong details. Use at least a
 few samples per pixel for previews, and prefer roughly 16+ samples per pixel
 when judging denoiser quality. Very low resolutions also make evaluation
 misleading because each local filter window covers too much of the image.
+
+Cloud residuals use deterministic front density, camera opacity, depth, and
+primary-light radiance as edge guides. The opacity is reused from the primary
+cloud integration, allowing sub-threshold wisps to remain in the volume-aware
+filter without an extra march; the sharp deterministic lighting layer is added
+after filtering. Once a pixel has at least 64 samples, its measured mean
+variance also reduces unnecessary wide filtering in already-converged cloud
+detail; lower-spp previews retain the full noise-removal pass.
 
 ## Scene Files
 
