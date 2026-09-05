@@ -4,11 +4,31 @@
 #include "Defaults.hpp"
 #include "Utilities.hpp"
 #include "Sampler.hpp"
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 
 namespace
 {
+	constexpr std::uint32_t VOLUME_STREAM_DIMENSION = 0x31000000u;
+
+	std::uint32_t mixBits(std::uint32_t value)
+	{
+		value ^= value >> 16u;
+		value *= 0x7feb352du;
+		value ^= value >> 15u;
+		value *= 0x846ca68bu;
+		value ^= value >> 16u;
+		return (value);
+	}
+
+	std::uint32_t nextSamplingStream(void)
+	{
+		static std::atomic<std::uint32_t> nextStream(1u);
+		return (nextStream.fetch_add(1u, std::memory_order_relaxed));
+	}
+
 	double	validatedDensity(double density)
 	{
 		if (!std::isfinite(density) || density <= 0.0)
@@ -26,6 +46,7 @@ namespace
 // Constructs the ConstantVolume with default values
 ConstantVolume::ConstantVolume(void)
 {
+	this->_samplingStream = nextSamplingStream();
 	this->_boundary = std::make_shared<Sphere>(
 		Vector3(0.0, 0.0, 0.0),
 		6.0,
@@ -39,6 +60,7 @@ ConstantVolume::ConstantVolume(void)
 // Constructs the ConstantVolume with custom values
 ConstantVolume::ConstantVolume(std::shared_ptr<Hittable> boundary, std::shared_ptr<Material> phaseFunction, double density)
 {
+	this->_samplingStream = nextSamplingStream();
 	if (!boundary)
 	{
 		throw std::invalid_argument("Volume boundary must not be null.");
@@ -97,7 +119,11 @@ bool	ConstantVolume::sampleScatteringDistance(Ray& ray, double t_min, double t_m
 		return (false);
 	}
 	double distanceInsideBoundary = (exitT - entryT) * rayLength;
-	double hitDistance = this->_negativeInverseDensity * log(std::max(Sampler::sample1D(Sampler::DIM_VOLUME_DISTANCE), 1e-12));
+	const std::uint32_t dimension = VOLUME_STREAM_DIMENSION
+		+ Sampler::DIM_VOLUME_DISTANCE
+		+ ((mixBits(this->_samplingStream) & 0x01ffffffu) << 5u);
+	double hitDistance = this->_negativeInverseDensity
+		* log(std::max(Sampler::sample1D(dimension), 1e-12));
 
 	if (hitDistance > distanceInsideBoundary)
 	{
@@ -128,6 +154,23 @@ bool	ConstantVolume::hitAny(Ray& ray, double t_min, double t_max) const
 	double hitT;
 
 	return (this->sampleScatteringDistance(ray, t_min, t_max, hitT));
+}
+
+Color ConstantVolume::shadowTransmittance(Ray& ray, double t_min, double t_max) const
+{
+	double entryT;
+	double exitT;
+	if (!this->_boundary || !this->_boundary->hitInterval(ray, -T_MAX, T_MAX, entryT, exitT))
+		return (Color(1.0, 1.0, 1.0));
+	entryT = std::max(entryT, std::max(0.0, t_min));
+	exitT = std::min(exitT, t_max);
+	if (entryT >= exitT)
+		return (Color(1.0, 1.0, 1.0));
+	const double rayLength = Utilities::vectorLength(ray.getDirection());
+	if (!std::isfinite(rayLength) || rayLength <= 0.0)
+		return (Color(1.0, 1.0, 1.0));
+	const double value = std::exp(-this->_density * (exitT - entryT) * rayLength);
+	return (Color(value, value, value));
 }
 
 // Creates an AABB / bounding box for this ConstantVolume

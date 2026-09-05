@@ -289,6 +289,7 @@ EnvironmentMap::EnvironmentMap(void)
 {
 	this->_width = 0;
 	this->_height = 0;
+	this->_averageRadiance = Color(0.0, 0.0, 0.0);
 	this->_totalWeight = 0.0;
 	this->_horizontalIrradiance = 0.0;
 }
@@ -302,6 +303,7 @@ EnvironmentMap::EnvironmentMap(std::size_t width, std::size_t height, std::vecto
 	this->_width = width;
 	this->_height = height;
 	this->_pixels = std::move(pixels);
+	this->_averageRadiance = Color(0.0, 0.0, 0.0);
 	this->_totalWeight = 0.0;
 	this->_horizontalIrradiance = 0.0;
 	this->buildDistribution();
@@ -501,9 +503,20 @@ EnvironmentMap::Sample	EnvironmentMap::sample(double selection, Sampler::Sample2
 	const std::size_t y = index / this->_width;
 	const std::size_t x = index % this->_width;
 	const double u = (static_cast<double>(x) + jitter.x) / static_cast<double>(this->_width);
-	const double v = 1.0 - ((static_cast<double>(y) + jitter.y) / static_cast<double>(this->_height));
+	const double theta0 = D_PI * static_cast<double>(y) / static_cast<double>(this->_height);
+	const double theta1 = D_PI * static_cast<double>(y + 1) / static_cast<double>(this->_height);
+	const double cosTheta0 = std::cos(theta0);
+	const double cosTheta1 = std::cos(theta1);
+	const double cosTheta = cosTheta0 + jitter.y * (cosTheta1 - cosTheta0);
+	const double radius = std::sqrt(std::max(0.0, 1.0 - cosTheta * cosTheta));
+	const double phi = (
+		wrap01(u - (rotationDegrees / 360.0)) - 0.5
+	) * 2.0 * D_PI;
 
-	sample.direction = this->uvToDirection(u, v, rotationDegrees);
+	// A lat-long row spans unequal latitude angles per unit solid angle. Once a
+	// texel is selected, interpolate cos(theta), not theta, so its conditional
+	// sample density is constant over the texel's solid angle and matches pdf().
+	sample.direction = Vector3(radius * std::cos(phi), cosTheta, radius * std::sin(phi));
 	sample.radiance = this->sampleDirection(sample.direction, rotationDegrees);
 	sample.pdf = this->pdf(sample.direction, rotationDegrees);
 	sample.valid = sample.pdf > 0.0 && std::isfinite(sample.pdf);
@@ -545,6 +558,15 @@ double	EnvironmentMap::averageLuminance(void) const
 		return (0.0);
 	}
 	return (this->_totalWeight / (4.0 * D_PI));
+}
+
+Color	EnvironmentMap::averageRadiance(void) const
+{
+	if (this->empty())
+	{
+		return (Color(0.0, 0.0, 0.0));
+	}
+	return (this->_averageRadiance);
 }
 
 double	EnvironmentMap::horizontalIrradiance(void) const
@@ -630,6 +652,7 @@ void	EnvironmentMap::buildDistribution(void)
 	this->_solidAngles.assign(this->_width * this->_height, 0.0);
 	this->_cdf.clear();
 	this->_cdf.reserve(this->_width * this->_height);
+	this->_averageRadiance = Color(0.0, 0.0, 0.0);
 	this->_totalWeight = 0.0;
 	this->_horizontalIrradiance = 0.0;
 
@@ -644,13 +667,15 @@ void	EnvironmentMap::buildDistribution(void)
 		for (std::size_t x = 0; x < this->_width; x++)
 		{
 			const std::size_t index = y * this->_width + x;
-			const double luminance = colorLuminance(this->_pixels[index]);
+			const Color radiance = sanitizeRadiance(this->_pixels[index]);
+			const double luminance = colorLuminance(radiance);
 			const double weight = (std::isfinite(luminance) && luminance > 0.0)
 				? luminance * solidAngle
 				: 0.0;
 
 			this->_solidAngles[index] = solidAngle;
 			this->_weights[index] = weight;
+			this->_averageRadiance += radiance * (solidAngle / (4.0 * D_PI));
 			this->_totalWeight += weight;
 			this->_horizontalIrradiance += luminance * horizonCosine * solidAngle;
 			this->_cdf.push_back(this->_totalWeight);
@@ -668,4 +693,5 @@ void	EnvironmentMap::buildDistribution(void)
 	{
 		this->_horizontalIrradiance = 0.0;
 	}
+	this->_averageRadiance = sanitizeRadiance(this->_averageRadiance);
 }

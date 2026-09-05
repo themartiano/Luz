@@ -1,0 +1,84 @@
+# Weather-modulated cumulus with an uneven condensation base and cached sunlight.
+# Set volume_reference=1 to compare the full stochastic volume transport.
+[settings]
+resolution=960,540
+samples=256
+volume_primary_samples=8
+volume_primary_max_steps=4096
+adaptive=1
+adaptiveminsamples=32
+adaptivebackgroundminsamples=12
+adaptivevolumeminsamples=64
+adaptivethreshold=0.012
+adaptivecheckinterval=8
+maxlightbounces=12
+view_transform=aces
+exposure=-6.35
+contrast=1.02
+bloom=0
+denoise=1
+sky=atmosphere
+atmosphere=0.18,6360000,6420000,7994,1200,24,12,0
+atmosphere_sun_scale=0.62
+meters_per_unit=1
+distanceblueness=0
+outputfilename=procedural-weather-cumulus.png
+
+[materials]
+material earth_ground {
+type=principled
+base_color=srgb(0.12,0.17,0.08)
+roughness=0.94
+}
+
+[scene]
+camera daylight_view {
+position=(0,6360180,2500)
+direction=(-0.015,0.245,-1)
+up=(0,1,0)
+focal_length_mm=40
+sensor_width_mm=36
+sensor_height_mm=20.25
+pinhole=1
+focus_distance=23000
+}
+directional_light afternoon_sun {
+direction=(0.80,-0.30,0.52)
+solar=1
+}
+objects{
+sphere earth {
+position=(0,0,0)
+radius=6360000
+material=earth_ground
+}
+cloud daylight_cumulus {
+type=cumulus
+position=(-500,6365350,-19000)
+size=(18000,8500,12000)
+coverage=0.66
+extinction=0.008
+albedo=(0.997,0.999,1.0)
+feature_scale=820
+macro_scale=1.60
+detail=0.34
+erosion=0.20
+puffiness=0.88
+towering=0.72
+dominance=0.64
+overhang=0.24
+fine_detail=0.90
+multiple_scattering_falloff=0.72
+multiple_scattering_compensation=0.28
+shear_direction=(0.75,0,-0.18)
+detail_octaves=4
+anisotropy=0.83
+droplet_size=20
+seed=1937
+quality=cinematic
+primary_detail=2
+directional_cache_resolution=8
+weather_variation=0.65
+base_variation=0.55
+}
+}

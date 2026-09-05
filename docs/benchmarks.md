@@ -53,10 +53,13 @@ Raw benchmark CSVs include:
 
 - Full process elapsed time, including scene loading
 - Render time
+- Learned volume-guide training time
 - Denoise time
 - Post-process time
 - Total samples rendered
 - Average samples per pixel
+- Display luminance p01, p50, and p99 after the selected view transform
+- Near-black, near-white, and clipped display-pixel fractions
 - Actual score
 - Render-only score
 
@@ -99,3 +102,25 @@ are:
 - `BENCH_DENOISE`: override the default denoising state
 - `BENCH_ADAPTIVE`: override the default adaptive sampling state
 - `BENCH_SCORE_SAMPLE_UNIT`: score divisor, defaulting to `1000`
+
+## Native Cloud Matrix
+
+`tools/benchmark_clouds.py` runs daylight, backlit, interior, cirrus and stratus
+scenes with fixed samples, seeds and threads, without denoising or adaptive
+sampling. It records process time (including cache construction), image hashes
+and optional display-space reference error in `results.csv`. Authored scenes
+require the local Disney volume; missing assets fail explicitly. Temporary
+scene files are removed after each case.
+
+```sh
+python3 tools/benchmark_clouds.py --output /tmp/cloud-direct --cache-resolution 0
+python3 tools/benchmark_clouds.py --output /tmp/cloud-cached --cache-resolution 4 \
+  --reference-directory /tmp/cloud-direct
+python3 tools/benchmark_clouds.py --output /tmp/cloud-reference --reference \
+  --samples 512 --repeat 1
+```
+
+Keep resolution, samples, seeds, threads, and integration settings fixed between
+runs. Compare several seeds and inspect the images: a faster render may use a
+lighting approximation. Reference mode is slower and still uses the scene's
+bounce limit and atmosphere model. Keep generated CSVs and images local.

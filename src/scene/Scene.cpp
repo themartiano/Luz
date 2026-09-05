@@ -9,6 +9,7 @@
 #include "Hittables/DirectionalLight.hpp"
 #include "LightUnits.hpp"
 #include "Materials/Emissive.hpp"
+#include "VolumeGuidingField.hpp"
 #include <limits>
 #include <utility>
 #include <algorithm>
@@ -103,9 +104,17 @@ Scene::Scene(void)
 	this->_sampleCount = D_SAMPLE_COUNT;
 	this->_adaptiveSampling = D_ADAPTIVE_SAMPLING;
 	this->_adaptiveMinSamples = D_ADAPTIVE_MIN_SAMPLES;
+	this->_adaptiveBackgroundMinSamples = 0;
+	this->_adaptiveVolumeMinSamples = 0;
 	this->_adaptiveCheckInterval = D_ADAPTIVE_CHECK_INTERVAL;
 	this->_adaptiveThreshold = D_ADAPTIVE_THRESHOLD;
 	this->_maxLightBounces = D_MAX_LIGHT_BOUNCES;
+	this->_volumeGuidingTrainingSamples = 0;
+	this->_volumeGuidingResolution = 16;
+	this->_volumeGuidingLobes = 16;
+	this->_volumeGuidingAnisotropy = 0.8;
+	this->_volumeGuidingStrength = 0.25;
+	this->_volumeGuidingStartBounce = 1;
 	this->_viewTransform = ViewTransform::AgX;
 	this->_exposure = D_EXPOSURE;
 	this->_contrast = D_CONTRAST;
@@ -199,6 +208,34 @@ void	Scene::setAdaptiveMinSamples(int adaptiveMinSamples)
 	this->_adaptiveMinSamples = adaptiveMinSamples;
 }
 
+int	Scene::getAdaptiveBackgroundMinSamples(void) const
+{
+	return (this->_adaptiveBackgroundMinSamples);
+}
+
+void	Scene::setAdaptiveBackgroundMinSamples(int adaptiveBackgroundMinSamples)
+{
+	if (adaptiveBackgroundMinSamples < 0)
+	{
+		throw std::invalid_argument("Adaptive background minimum samples must be non-negative.");
+	}
+	this->_adaptiveBackgroundMinSamples = adaptiveBackgroundMinSamples;
+}
+
+int	Scene::getAdaptiveVolumeMinSamples(void) const
+{
+	return (this->_adaptiveVolumeMinSamples);
+}
+
+void	Scene::setAdaptiveVolumeMinSamples(int adaptiveVolumeMinSamples)
+{
+	if (adaptiveVolumeMinSamples < 0)
+	{
+		throw std::invalid_argument("Adaptive volume minimum samples must be non-negative.");
+	}
+	this->_adaptiveVolumeMinSamples = adaptiveVolumeMinSamples;
+}
+
 int	Scene::getAdaptiveCheckInterval(void) const
 {
 	return (this->_adaptiveCheckInterval);
@@ -283,6 +320,88 @@ void	Scene::setPhotographicExposure(double fNumber, double shutterSeconds, doubl
 	}
 
 	this->setExposure(std::log2((shutterSeconds * (iso / 100.0)) / (fNumber * fNumber)));
+}
+
+int	Scene::getVolumeGuidingTrainingSamples(void) const
+{
+	return (this->_volumeGuidingTrainingSamples);
+}
+
+void	Scene::setVolumeGuidingTrainingSamples(int trainingSamples)
+{
+	if (trainingSamples < 0)
+		throw std::invalid_argument("Volume guiding training samples must be non-negative.");
+	this->_volumeGuidingTrainingSamples = trainingSamples;
+}
+
+std::uint32_t	Scene::getVolumeGuidingResolution(void) const
+{
+	return (this->_volumeGuidingResolution);
+}
+
+void	Scene::setVolumeGuidingResolution(std::uint32_t resolution)
+{
+	if (resolution < 1 || resolution > 128)
+		throw std::invalid_argument("Volume guiding resolution must be between 1 and 128.");
+	this->_volumeGuidingResolution = resolution;
+}
+
+std::uint32_t	Scene::getVolumeGuidingLobes(void) const
+{
+	return (this->_volumeGuidingLobes);
+}
+
+void	Scene::setVolumeGuidingLobes(std::uint32_t lobes)
+{
+	if (lobes < 4 || lobes > 64)
+		throw std::invalid_argument("Volume guiding lobes must be between 4 and 64.");
+	this->_volumeGuidingLobes = lobes;
+}
+
+double	Scene::getVolumeGuidingAnisotropy(void) const
+{
+	return (this->_volumeGuidingAnisotropy);
+}
+
+void	Scene::setVolumeGuidingAnisotropy(double anisotropy)
+{
+	if (!std::isfinite(anisotropy) || anisotropy < 0.0 || anisotropy > 0.95)
+		throw std::invalid_argument("Volume guiding anisotropy must be between 0 and 0.95.");
+	this->_volumeGuidingAnisotropy = anisotropy;
+}
+
+double	Scene::getVolumeGuidingStrength(void) const
+{
+	return (this->_volumeGuidingStrength);
+}
+
+void	Scene::setVolumeGuidingStrength(double strength)
+{
+	if (!std::isfinite(strength) || strength < 0.0 || strength > 0.75)
+		throw std::invalid_argument("Volume guiding strength must be between 0 and 0.75.");
+	this->_volumeGuidingStrength = strength;
+}
+
+int	Scene::getVolumeGuidingStartBounce(void) const
+{
+	return (this->_volumeGuidingStartBounce);
+}
+
+void	Scene::setVolumeGuidingStartBounce(int startBounce)
+{
+	if (startBounce < 0 || startBounce > 64)
+		throw std::invalid_argument("Volume guiding start bounce must be between 0 and 64.");
+	this->_volumeGuidingStartBounce = startBounce;
+}
+
+void	Scene::setVolumeGuidingField(std::shared_ptr<VolumeGuidingField> field)
+{
+	this->_volumeGuidingField = std::move(field);
+}
+
+const std::shared_ptr<VolumeGuidingField>&	Scene::getVolumeGuidingField(void) const
+{
+	return (this->_volumeGuidingField);
 }
 
 double	Scene::getContrast(void) const
@@ -894,4 +1013,18 @@ void	Scene::setRenderStats(SceneRenderStats renderStats)
 const SceneRenderStats&	Scene::getRenderStats(void) const
 {
 	return (this->_renderStats);
+}
+
+void Scene::setVolumePrimarySamples(int value)
+{
+	if (value < 1 || value > 256)
+		throw std::invalid_argument("Volume primary samples must be between 1 and 256.");
+	_volumePrimarySamples = static_cast<unsigned int>(value);
+}
+
+void Scene::setVolumePrimaryMaxSteps(int value)
+{
+	if (value < 48 || value > 65536)
+		throw std::invalid_argument("Volume primary max steps must be between 48 and 65536.");
+	_volumePrimaryMaxSteps = value;
 }

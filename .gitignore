@@ -21,3 +21,21 @@ Makefile.tmp
 tools/image-compare*
 exports
 objs
+
+# Large source and converted volumetric datasets are local render assets.
+/assets/volumes/
+
+# Generated stress-test inputs and temporary scene exports.
+/examples/objects/hp-suzanne.obj
+/examples/scenes/banana-pile-*.luz
+/examples/scenes/suzanne-stress-test.luz
+/examples/scenes/tmp*
+
+# Local exploratory scenes that are not maintained examples.
+/examples/scenes/disney-cloud.luz
+/examples/scenes/golden-star-bloom.luz
+/examples/scenes/suzanne-instances.luz
+
+# Local render experiments and generated cloud benchmark results.
+/renders/
+/benchmarks/cloud-improvements.csv

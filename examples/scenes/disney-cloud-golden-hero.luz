@@ -1,0 +1,65 @@
+# Original Luz golden-hour hero using Disney's authored density as the source
+# volume. The camera, scale, physical atmosphere, lighting, and grade are Luz
+# scene choices; no sampled background or reference framing is used.
+[settings]
+resolution=960,540
+samples=512
+adaptive=1
+adaptiveminsamples=48
+adaptivebackgroundminsamples=16
+adaptivevolumeminsamples=96
+adaptivethreshold=0.01
+adaptivecheckinterval=8
+maxlightbounces=10
+view_transform=aces
+exposure=-3.8
+bloom=0
+denoise=1
+sky=atmosphere
+atmosphere=0.18,6360000,6420000,7994,1200,20,10,0
+atmosphere_sun_scale=1.2
+meters_per_unit=1
+outputfilename=disney-cloud-golden-hero.png
+distanceblueness=0
+
+[materials]
+material earth_ground {
+type=principled
+base_color=srgb(0.08,0.07,0.05)
+roughness=0.95
+}
+
+[scene]
+camera hero_view {
+position=(-13000,6362400,-8000)
+direction=(13000,2800,-6000)
+up=(0,1,0)
+focal_length_mm=45
+sensor_width_mm=36
+sensor_height_mm=20.25
+pinhole=1
+focus_distance=16000
+}
+directional_light golden_sun {
+direction=(0.25,-0.11,0.962)
+color=blackbody(4200)
+irradiance=120
+}
+objects{
+sphere earth {
+position=(0,0,0)
+radius=6360000
+material=earth_ground
+}
+volume_grid hero_cloud {
+file=../../assets/volumes/wdas_cloud_half.luzvol
+position=(0,6365200,-14000)
+size=(10500,7100,12900)
+extinction=0.1575
+albedo=(0.998,0.999,1.0)
+droplet_size=20
+multiple_scattering_falloff=0.8
+multiple_scattering_compensation=0.72
+quality=final
+}
+}

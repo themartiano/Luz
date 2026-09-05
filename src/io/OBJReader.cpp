@@ -354,15 +354,6 @@ namespace
 		return (triangle);
 	}
 
-	void	printMeshLoadProgress(const ObjLoadProgress& progress, bool rewriteLine)
-	{
-		const std::size_t percent = progress.total == 0 ? 100 : (progress.loaded * 100) / progress.total;
-
-		std::cout
-			<< (rewriteLine ? "\r" : "") << CLR_CYAN << "Loading meshes: " << CLR_WHITE
-			<< "[ " << percent << "% ]" << CLR_RESET << std::flush;
-	}
-
 	void	beginMeshLoadProgress(ObjLoadProgress& progress)
 	{
 		std::lock_guard<std::mutex> lock(progress.mutex);
@@ -371,7 +362,13 @@ namespace
 		{
 			progress.started = true;
 			progress.startTime = std::chrono::steady_clock::now();
-			printMeshLoadProgress(progress, false);
+			if (progress.outputEnabled)
+			{
+				progress.reporter = std::make_unique<TerminalProgress::PhaseProgress>(
+					"Model load",
+					true
+				);
+			}
 		}
 	}
 
@@ -384,22 +381,31 @@ namespace
 			progress.loaded++;
 		}
 		progress.skippedDegenerateTriangles += skippedDegenerateTriangles;
-		printMeshLoadProgress(progress, true);
+		if (progress.outputEnabled && progress.reporter)
+		{
+			const unsigned int percent = progress.total == 0
+				? 100u
+				: static_cast<unsigned int>((progress.loaded * 100u) / progress.total);
+
+			progress.reporter->update(percent);
+		}
 		if (progress.loaded >= progress.total)
 		{
 			const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - progress.startTime;
 
-			std::cout
-				<< CLR_GREEN_BRIGHT << "\nMesh loading done! "
-				<< CLR_BLUE_BRIGHT << "(Duration: " << CLR_WHITE << elapsed.count() << "s";
-			if (progress.skippedDegenerateTriangles > 0)
+			progress.elapsedMS = elapsed.count() * 1000.0;
+			if (progress.outputEnabled && progress.reporter)
 			{
-				std::cout
-					<< CLR_BLUE_BRIGHT << ", skipped " << CLR_WHITE << progress.skippedDegenerateTriangles
-					<< CLR_BLUE_BRIGHT << " degenerate triangle"
-					<< (progress.skippedDegenerateTriangles == 1 ? "" : "s");
+				progress.reporter->finish(progress.elapsedMS);
+				if (progress.skippedDegenerateTriangles > 0)
+				{
+					std::cout
+						<< CLR_YELLOW << "  Skipped " << CLR_WHITE << progress.skippedDegenerateTriangles
+						<< CLR_YELLOW << " degenerate OBJ triangle"
+						<< (progress.skippedDegenerateTriangles == 1 ? "" : "s")
+						<< "." << CLR_RESET << std::endl;
+				}
 			}
-			std::cout << CLR_BLUE_BRIGHT << ")\n\n" << CLR_RESET;
 		}
 	}
 

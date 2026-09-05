@@ -53,8 +53,8 @@ Renderer::internal::RenderCamera	Renderer::internal::_prepareRenderCamera(Scene&
 
 	renderCamera.width = scene.getImage()->getWidth();
 	renderCamera.height = scene.getImage()->getHeight();
-	renderCamera.inverseWidthMinusOne = renderCamera.width > 1.0 ? 1.0 / (renderCamera.width - 1.0) : 0.0;
-	renderCamera.inverseHeightMinusOne = renderCamera.height > 1.0 ? 1.0 / (renderCamera.height - 1.0) : 0.0;
+	renderCamera.inverseWidth = renderCamera.width > 0.0 ? 1.0 / renderCamera.width : 0.0;
+	renderCamera.inverseHeight = renderCamera.height > 0.0 ? 1.0 / renderCamera.height : 0.0;
 
 	const Camera camera = scene.getActiveCamera();
 
@@ -85,8 +85,8 @@ Renderer::internal::RenderCamera	Renderer::internal::_prepareRenderCamera(Scene&
 Ray	Renderer::internal::_generateRay(const RenderCamera& renderCamera, std::size_t x, std::size_t y)
 {
 	const Sampler::Sample2D cameraSample = Sampler::sample2D(Sampler::DIM_CAMERA);
-	double xU = double(static_cast<double>(x) + cameraSample.x) * renderCamera.inverseWidthMinusOne;
-	double yV = double(static_cast<double>(y) + cameraSample.y) * renderCamera.inverseHeightMinusOne;
+	double xU = double(static_cast<double>(x) + cameraSample.x) * renderCamera.inverseWidth;
+	double yV = double(static_cast<double>(y) + cameraSample.y) * renderCamera.inverseHeight;
 
 	Vector3	offset(0.0, 0.0, 0.0);
 	if (renderCamera.lensRadius > 0.0)

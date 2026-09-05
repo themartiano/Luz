@@ -10,6 +10,13 @@ bool Hittable::hitAny(Ray& ray, double t_min, double t_max) const
 	return (this->hit(ray, hitRecord, t_min, t_max));
 }
 
+Color Hittable::shadowTransmittance(Ray& ray, double t_min, double t_max) const
+{
+	return (this->hitAny(ray, t_min, t_max)
+		? Color(0.0, 0.0, 0.0)
+		: Color(1.0, 1.0, 1.0));
+}
+
 bool Hittable::hitInterval(Ray& ray, double t_min, double t_max, double& t0, double& t1) const
 {
 	HitRecord firstHit, secondHit;

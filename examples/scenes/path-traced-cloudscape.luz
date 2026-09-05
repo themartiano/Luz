@@ -1,0 +1,106 @@
+# Aerial cloudscape: a layered stratocumulus deck with rising cumulus towers.
+# Draft: luz this-file --samples 8 --resolution 320x180 --no-adaptive
+[settings]
+resolution=960,540
+samples=256
+adaptive=1
+adaptiveminsamples=32
+adaptivethreshold=0.015
+adaptivecheckinterval=8
+maxlightbounces=24
+view_transform=aces
+exposure=-6.2
+bloom=1
+denoise=1
+sky=atmosphere
+atmosphere=0.18,6360000,6420000,7994,1200,20,10,0
+atmosphere_sun_scale=0.65
+meters_per_unit=1
+outputfilename=path-traced-cloudscape.png
+distanceblueness=0
+
+[materials]
+material earth_ground {
+type=principled
+base_color=srgb(0.08,0.16,0.12)
+roughness=0.95
+}
+
+[scene]
+camera aerial {
+position=(0,6370200,0)
+direction=(0,-0.19,-1)
+up=(0,1,0)
+focal_length_mm=35
+sensor_width_mm=36
+sensor_height_mm=20.25
+pinhole=1
+focus_distance=24000
+}
+directional_light sun {
+direction=(0.62,-0.73,-0.28)
+solar=1
+}
+objects{
+sphere earth {
+position=(0,0,0)
+radius=6360000
+material=earth_ground
+}
+cloud cloud_deck {
+type=stratocumulus
+position=(0,6363000,-25000)
+size=(52000,2600,48000)
+coverage=0.62
+extinction=0.010
+feature_scale=1750
+detail=0.55
+erosion=0.34
+puffiness=0.66
+towering=0.30
+seed=4401
+quality=production
+}
+cloud foreground_towers {
+type=cumulus
+position=(-4500,6364300,-15000)
+size=(19000,6500,12000)
+coverage=0.48
+extinction=0.016
+feature_scale=1350
+detail=0.70
+erosion=0.42
+puffiness=0.90
+towering=0.88
+anisotropy=0.84
+seed=7193
+quality=cinematic
+}
+cloud distant_towers {
+type=cumulus
+position=(12000,6363900,-36000)
+size=(25000,5400,15000)
+coverage=0.42
+extinction=0.014
+feature_scale=1550
+detail=0.66
+erosion=0.40
+puffiness=0.86
+towering=0.72
+seed=2267
+quality=production
+}
+cloud high_wisps {
+type=cirrus
+position=(-6000,6371200,-36000)
+size=(60000,700,50000)
+coverage=0.14
+extinction=0.0009
+feature_scale=3100
+detail=0.80
+erosion=0.70
+anisotropy=0.89
+seed=905
+quality=production
+}
+}

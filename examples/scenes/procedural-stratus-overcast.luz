@@ -1,0 +1,90 @@
+# Broken daytime overcast built from Luz's procedural stratus preset.
+# An aerial camera looks obliquely across two separated marine cloud sheets.
+# Broken regions reveal the lower layer and ocean, preserving atmospheric depth.
+[settings]
+resolution=960,540
+samples=256
+adaptive=1
+adaptiveminsamples=32
+adaptivebackgroundminsamples=16
+adaptivevolumeminsamples=64
+adaptivethreshold=0.012
+adaptivecheckinterval=8
+maxlightbounces=10
+view_transform=aces
+exposure=-7.0
+contrast=1.03
+bloom=0
+denoise=1
+sky=atmosphere
+atmosphere=0.18,6360000,6420000,7994,1200,20,10,0
+atmosphere_sun_scale=0.58
+meters_per_unit=1
+outputfilename=procedural-stratus-overcast.png
+distanceblueness=0
+
+[materials]
+material ocean_surface {
+type=principled
+base_color=srgb(0.025,0.07,0.11)
+roughness=0.24
+}
+
+[scene]
+camera main {
+position=(-7000,6366000,0)
+direction=(0.18,-0.085,-1)
+up=(0,1,0)
+focal_length_mm=42
+sensor_width_mm=36
+sensor_height_mm=20.25
+pinhole=1
+focus_distance=18000
+}
+directional_light sun {
+direction=(0.76,-0.40,-0.51)
+solar=1
+}
+objects{
+sphere earth {
+position=(0,0,0)
+radius=6360000
+material=ocean_surface
+}
+cloud advancing_sheet {
+type=stratus
+position=(-3500,6362750,-30000)
+size=(70000,900,80000)
+coverage=0.55
+extinction=0.0022
+albedo=(0.996,0.998,1.0)
+feature_scale=2700
+detail=0.42
+erosion=0.30
+fine_detail=0.42
+multiple_scattering_falloff=0.76
+multiple_scattering_compensation=0.52
+shear_direction=(1,0,0.25)
+anisotropy=0.78
+seed=7717
+quality=production
+}
+cloud distant_sheet {
+type=stratus
+position=(12000,6361650,-58000)
+size=(70000,700,42000)
+coverage=0.64
+extinction=0.0020
+albedo=(0.995,0.998,1.0)
+feature_scale=3900
+detail=0.25
+erosion=0.16
+fine_detail=0.28
+multiple_scattering_falloff=0.78
+multiple_scattering_compensation=0.54
+shear_direction=(1,0,-0.18)
+anisotropy=0.76
+seed=3301
+quality=production
+}
+}

@@ -1,11 +1,15 @@
 #include "Atmosphere.hpp"
 #include "Defaults.hpp"
+#include "ColorManagement.hpp"
 #include "ColorScience.hpp"
 #include "LightUnits.hpp"
+#include "ONB.hpp"
 #include "Utilities.hpp"
 #include "SystemSpecifics.hpp"
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 
 namespace
@@ -18,6 +22,25 @@ namespace
 	Vector3	exponentialAttenuation(const Vector3& tau)
 	{
 		return (Vector3(std::exp(-tau.getX()), std::exp(-tau.getY()), std::exp(-tau.getZ())));
+	}
+
+	Color	atmosphereTransmittanceInACEScg(const Vector3& linearSRGBOpticalDepth)
+	{
+		// Transmittance is a multiplicative operator, not radiance: applying the
+		// RGB color transform to exp(-tau) incorrectly mixes its channels. Within
+		// the renderer's diagonal RGB transport approximation, first express the
+		// additive optical depth in the ACEScg working basis, then exponentiate each
+		// working channel to obtain the component-wise attenuation operator.
+		const Color workingOpticalDepth = ColorManagement::acescgFromLinearSRGB(Color(
+			linearSRGBOpticalDepth.getX(),
+			linearSRGBOpticalDepth.getY(),
+			linearSRGBOpticalDepth.getZ()
+		));
+		return (Color(
+			std::exp(-std::max(0.0, workingOpticalDepth.getRed())),
+			std::exp(-std::max(0.0, workingOpticalDepth.getGreen())),
+			std::exp(-std::max(0.0, workingOpticalDepth.getBlue()))
+		));
 	}
 
 	double	densityAtHeight(double height, double inverseScaleHeight)
@@ -59,6 +82,14 @@ namespace
 	}
 }
 
+struct Atmosphere::DiffuseSkyCache
+{
+	std::mutex mutex;
+	bool valid = false;
+	Vector3 position;
+	Color radiance;
+};
+
 /*
 	Constructors
 */
@@ -66,6 +97,7 @@ namespace
 // Constructs the Atmosphere with default values
 Atmosphere::Atmosphere(void)
 {
+	this->_diffuseSkyCache = std::make_shared<DiffuseSkyCache>();
 	this->_sunAngle = -0.4;
 	this->_earthRadius = D_EARTH_RADIUS;
 	this->_atmosphereRadius = D_ATMOSPHERE_RADIUS;
@@ -83,6 +115,7 @@ Atmosphere::Atmosphere(void)
 // Constructs the Atmosphere with custom values
 Atmosphere::Atmosphere(double sunAngle, double earthRadius, double atmosphereRadius, double hR, double hM, int samples, int lightSamples, double starsBrightness)
 {
+	this->_diffuseSkyCache = std::make_shared<DiffuseSkyCache>();
 	this->_sunAngle = -0.4;
 	this->_earthRadius = D_EARTH_RADIUS;
 	this->_atmosphereRadius = D_ATMOSPHERE_RADIUS;
@@ -112,8 +145,12 @@ Atmosphere::Atmosphere(double sunAngle, double earthRadius, double atmosphereRad
 	setStarsBrightness(starsBrightness);
 }
 
-const Vector3 Atmosphere::betaR(3.8e-6, 13.5e-6, 33.1e-6);
-const Vector3 Atmosphere::betaM(21e-6, 21e-6, 21e-6);
+// Earth molecular scattering coefficients from the production atmosphere
+// model (Hillaire 2020), in the linear-sRGB spectral approximation.
+const Vector3 Atmosphere::betaR(5.802e-6, 13.558e-6, 33.1e-6);
+// Clear-air Mie scattering. The previous 21e-6 value described heavy aerosol
+// haze and desaturated every daytime sky; absorption is applied separately.
+const Vector3 Atmosphere::betaM(3.996e-6, 3.996e-6, 3.996e-6);
 
 // Returns the Earth Radius
 double  Atmosphere::getEarthRadius(void) const
@@ -196,12 +233,14 @@ void	Atmosphere::setSunAngle(double newAngle)
 void	Atmosphere::setSunDirection(Vector3 sunDirection)
 {
 	this->_sunDirection = normalizedSunDirection(sunDirection);
+	this->invalidateDiffuseSkyCache();
 }
 
 void	Atmosphere::setSunRadiance(Color sunRadiance)
 {
 	requireFiniteNonNegativeColor(sunRadiance, "Atmosphere sun radiance");
 	this->_sunRadiance = sunRadiance;
+	this->invalidateDiffuseSkyCache();
 }
 
 void	Atmosphere::setSunRadianceScale(double sunRadianceScale)
@@ -211,6 +250,7 @@ void	Atmosphere::setSunRadianceScale(double sunRadianceScale)
 		throw std::invalid_argument("Atmosphere sun radiance scale must be finite and non-negative.");
 	}
 	this->_sunRadianceScale = sunRadianceScale;
+	this->invalidateDiffuseSkyCache();
 }
 
 void	Atmosphere::setMetersPerUnit(double metersPerUnit)
@@ -220,6 +260,7 @@ void	Atmosphere::setMetersPerUnit(double metersPerUnit)
 		throw std::invalid_argument("Atmosphere meters per unit must be finite and positive.");
 	}
 	this->_metersPerUnit = metersPerUnit;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the EarthRadius
@@ -234,6 +275,7 @@ void	Atmosphere::setEarthRadius(double earthRadius)
 		throw std::invalid_argument("Earth radius must be smaller than atmosphere radius.");
 	}
 	this->_earthRadius = earthRadius;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the AtmosphereRadius
@@ -248,6 +290,7 @@ void	Atmosphere::setAtmosphereRadius(double atmosphereRadius)
 		throw std::invalid_argument("Atmosphere radius must be larger than Earth radius.");
 	}
 	this->_atmosphereRadius = atmosphereRadius;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the HR value
@@ -258,6 +301,7 @@ void	Atmosphere::setHR(double hR)
 		throw std::invalid_argument("Atmosphere HR must be positive.");
 	}
 	this->_hR = hR;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the HM value
@@ -268,6 +312,7 @@ void	Atmosphere::setHM(double hM)
 		throw std::invalid_argument("Atmosphere HM must be positive.");
 	}
 	this->_hM = hM;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the Sample count
@@ -278,6 +323,7 @@ void	Atmosphere::setSamples(int samples)
 		throw std::invalid_argument("Atmosphere sample count must be positive.");
 	}
 	this->_samples = samples;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the Light Sample count
@@ -288,6 +334,7 @@ void	Atmosphere::setLightSamples(int lightSamples)
 		throw std::invalid_argument("Atmosphere light sample count must be positive.");
 	}
 	this->_lightSamples = lightSamples;
+	this->invalidateDiffuseSkyCache();
 }
 
 // Sets the Stars Brightness
@@ -298,6 +345,19 @@ void	Atmosphere::setStarsBrightness(double starsBrightness)
 		throw std::invalid_argument("Stars brightness must be non-negative.");
 	}
 	this->_starsBrightness = starsBrightness;
+}
+
+void	Atmosphere::invalidateDiffuseSkyCache(void)
+{
+	// Atmosphere remains cheaply copyable, but a mutated copy must never publish
+	// its sky estimate into another Atmosphere instance with different settings.
+	if (!this->_diffuseSkyCache || this->_diffuseSkyCache.use_count() != 1)
+	{
+		this->_diffuseSkyCache = std::make_shared<DiffuseSkyCache>();
+		return;
+	}
+	std::lock_guard<std::mutex> lock(this->_diffuseSkyCache->mutex);
+	this->_diffuseSkyCache->valid = false;
 }
 
 //Updates Sun Direction (Vector3) using Sun Angle (double)
@@ -418,12 +478,22 @@ AtmosphereSample	Atmosphere::sampleSegment(const Ray& ray, double t_max) const
 
 		const double sampleOpticalDepthR = densityR * segmentLength;
 		const double sampleOpticalDepthM = densityM * segmentLength;
+		const double midpointOpticalDepthR = opticalDepthR + 0.5 * sampleOpticalDepthR;
+		const double midpointOpticalDepthM = opticalDepthM + 0.5 * sampleOpticalDepthM;
 		opticalDepthR += sampleOpticalDepthR;
 		opticalDepthM += sampleOpticalDepthM;
 
 		Ray ray2(samplePosition, this->_sunDirection);
 		HitRecord hitRecord2;
 		if (!planetaryHit(this->_atmosphereRadius, ray2, hitRecord2) || hitRecord2.t1 <= 0.0)
+		{
+			continue;
+		}
+		HitRecord earthLightHitRecord;
+		if (
+			planetaryHit(this->_earthRadius, ray2, earthLightHitRecord)
+			&& earthLightHitRecord.t1 > 1e-6
+		)
 		{
 			continue;
 		}
@@ -436,43 +506,122 @@ AtmosphereSample	Atmosphere::sampleSegment(const Ray& ray, double t_max) const
 
 		double  opticalDepthLightR = 0.0;
 		double  opticalDepthLightM = 0.0;
-		bool	reachesSun = true;
-
 		for (int j = 0; j < this->_lightSamples; j++)
 		{
 			const double lightSampleT = (static_cast<double>(j) + 0.5) * segmentLengthLight;
 			const Vector3 samplePositionLight = samplePosition + lightSampleT * this->_sunDirection;
 			const double heightLight = Utilities::vectorLength(samplePositionLight) - this->_earthRadius;
-			if (heightLight < 0.0)
-			{
-				reachesSun = false;
-				break;
-			}
 			opticalDepthLightR += densityAtHeight(heightLight, inverseHR) * segmentLengthLight;
 			opticalDepthLightM += densityAtHeight(heightLight, inverseHM) * segmentLengthLight;
 		}
 
-		if (reachesSun)
-		{
-			const Vector3 tau = betaR * (opticalDepthR + opticalDepthLightR)
-				+ betaM * kMieAbsorptionScale * (opticalDepthM + opticalDepthLightM);
-			const Vector3 attenuation = exponentialAttenuation(tau);
-			sumR += attenuation * sampleOpticalDepthR;
-			sumM += attenuation * sampleOpticalDepthM;
-		}
+		const Vector3 tau = betaR * (midpointOpticalDepthR + opticalDepthLightR)
+			+ betaM * kMieAbsorptionScale * (midpointOpticalDepthM + opticalDepthLightM);
+		const Vector3 attenuation = exponentialAttenuation(tau);
+		sumR += attenuation * sampleOpticalDepthR;
+		sumM += attenuation * sampleOpticalDepthM;
 	}
 
 	const Vector3 viewTau = betaR * opticalDepthR + betaM * kMieAbsorptionScale * opticalDepthM;
-	const Vector3 viewTransmittance = exponentialAttenuation(viewTau);
-	const Vector3 sunRadiance = static_cast<Vector3>(this->_sunRadiance * this->_sunRadianceScale);
-	Vector3 result = (sumR * betaR * phaseR + sumM * betaM * phaseM) * sunRadiance;
-	sample.inScattering = Color(result.getX(), result.getY(), result.getZ());
-	sample.transmittance = Color(
-		viewTransmittance.getX(),
-		viewTransmittance.getY(),
-		viewTransmittance.getZ()
+	// The compact betaR/betaM triplets are sampled linear-sRGB coefficients.
+	// Keep their channel arithmetic in that basis, then cross the color-space
+	// boundary once into Luz's scene-linear ACEScg working space.
+	const Vector3 sunRadiance = static_cast<Vector3>(
+		ColorManagement::linearSRGBFromACEScg(this->_sunRadiance)
+		* this->_sunRadianceScale
 	);
+	Vector3 result = (sumR * betaR * phaseR + sumM * betaM * phaseM) * sunRadiance;
+	sample.inScattering = ColorManagement::acescgFromLinearSRGB(Color(
+		result.getX(),
+		result.getY(),
+		result.getZ()
+	));
+	sample.transmittance = atmosphereTransmittanceInACEScg(viewTau);
 	return (sample);
+}
+
+// Integrates view-ray extinction without the more expensive in-scattering light loop.
+Color	Atmosphere::sampleTransmittance(const Ray& ray, double t_max) const
+{
+	if (!std::isfinite(t_max) || t_max <= T_MIN)
+		return (Color(1.0, 1.0, 1.0));
+	const double tMaxMeters = this->sceneUnitsToMeters(t_max);
+	const double tMinMeters = this->sceneUnitsToMeters(T_MIN);
+	if (!std::isfinite(tMaxMeters) || tMaxMeters <= tMinMeters)
+		return (Color(1.0, 1.0, 1.0));
+
+	const Ray meterRay(ray.getOrigin() * this->_metersPerUnit, ray.getDirection());
+	HitRecord atmosphereHitRecord;
+	if (!planetaryHit(this->_atmosphereRadius, meterRay, atmosphereHitRecord) || atmosphereHitRecord.t1 <= tMinMeters)
+		return (Color(1.0, 1.0, 1.0));
+
+	double tMax = std::min(tMaxMeters, atmosphereHitRecord.t1);
+	HitRecord earthHitRecord;
+	if (planetaryHit(this->_earthRadius, meterRay, earthHitRecord) && earthHitRecord.t1 > tMinMeters)
+		tMax = std::min(tMax, std::max(0.0, earthHitRecord.t0));
+	const double tMin = std::max(tMinMeters, atmosphereHitRecord.t0);
+	if (!std::isfinite(tMin) || !std::isfinite(tMax) || tMax <= tMin)
+		return (Color(1.0, 1.0, 1.0));
+
+	const double segmentLength = (tMax - tMin) / this->_samples;
+	if (!std::isfinite(segmentLength) || segmentLength <= 0.0)
+		return (Color(1.0, 1.0, 1.0));
+	const double inverseHR = 1.0 / this->_hR;
+	const double inverseHM = 1.0 / this->_hM;
+	double opticalDepthR = 0.0;
+	double opticalDepthM = 0.0;
+	for (int i = 0; i < this->_samples; i++)
+	{
+		const double sampleT = tMin + (static_cast<double>(i) + 0.5) * segmentLength;
+		const Vector3 position = meterRay.getOrigin() + sampleT * meterRay.getDirection();
+		const double height = Utilities::vectorLength(position) - this->_earthRadius;
+		opticalDepthR += densityAtHeight(height, inverseHR) * segmentLength;
+		opticalDepthM += densityAtHeight(height, inverseHM) * segmentLength;
+	}
+	const Vector3 tau = betaR * opticalDepthR + betaM * kMieAbsorptionScale * opticalDepthM;
+	return (atmosphereTransmittanceInACEScg(tau));
+}
+
+Color	Atmosphere::sampleDiffuseSkyRadiance(const Vector3& position) const
+{
+	if (!this->_diffuseSkyCache || Utilities::vectorLengthSquared(position) <= 1e-12)
+		return (Color(0.0, 0.0, 0.0));
+	std::lock_guard<std::mutex> lock(this->_diffuseSkyCache->mutex);
+	if (
+		this->_diffuseSkyCache->valid
+		&& Utilities::vectorLengthSquared(
+			this->_diffuseSkyCache->position - position
+		) <= 1e-12
+	)
+		return (this->_diffuseSkyCache->radiance);
+
+	// Equal-solid-angle Fibonacci quadrature over the local upper hemisphere.
+	// Twelve directions resolve the broad Rayleigh/Mie sky field while keeping
+	// this one-time control calculation negligible beside volume-cache creation.
+	constexpr int sampleCount = 12;
+	constexpr double goldenAngle = 2.39996322972865332223;
+	const Vector3 up = Utilities::normalize(position);
+	const ONB basis(up);
+	Color radiance(0.0, 0.0, 0.0);
+	for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+	{
+		const double z = (static_cast<double>(sampleIndex) + 0.5)
+			/ static_cast<double>(sampleCount);
+		const double radius = std::sqrt(std::max(0.0, 1.0 - z * z));
+		const double phi = goldenAngle * static_cast<double>(sampleIndex);
+		const Vector3 direction = basis.local(
+			radius * std::cos(phi),
+			radius * std::sin(phi),
+			z
+		);
+		const Ray skyRay = Ray::fromNormalizedDirection(position, direction);
+		radiance += this->sampleSegment(skyRay, T_MAX).inScattering;
+	}
+	radiance /= static_cast<double>(sampleCount);
+	this->_diffuseSkyCache->position = position;
+	this->_diffuseSkyCache->radiance = radiance;
+	this->_diffuseSkyCache->valid = true;
+	return (radiance);
 }
 
 // Returns the sky color for 'ray'

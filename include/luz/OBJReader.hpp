@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Hittables/Mesh.hpp"
+#include "TerminalProgress.hpp"
 #include "Vector3.hpp"
 #include <array>
 #include <chrono>
@@ -31,7 +32,10 @@ struct	ObjLoadProgress
 	std::size_t	loaded = 0;
 	std::size_t	skippedDegenerateTriangles = 0;
 	bool		started = false;
+	bool		outputEnabled = true;
+	double		elapsedMS = 0.0;
 	std::chrono::steady_clock::time_point	startTime;
+	std::unique_ptr<TerminalProgress::PhaseProgress>	reporter;
 	std::mutex	mutex;
 };
 

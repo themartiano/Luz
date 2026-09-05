@@ -6,6 +6,8 @@
 #include "Hittables/Rectangle.hpp"
 #include "Hittables/DirectionalLight.hpp"
 #include "Hittables/ConstantVolume.hpp"
+#include "Hittables/CloudVolume.hpp"
+#include "Hittables/SparseGridVolume.hpp"
 #include "Hittables/Triangle.hpp"
 #include "Hittables/Mesh.hpp"
 #include "Hittables/MeshInstance.hpp"
@@ -21,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <filesystem>
@@ -31,6 +34,7 @@
 #include <queue>
 #include <stdexcept>
 #include <memory>
+#include <limits>
 #include <thread>
 #include <utility>
 #include <cstdio>
@@ -236,6 +240,11 @@ namespace
 			bool	hitAny(Ray& ray, double t_min, double t_max) const override
 			{
 				return (this->hittable()->hitAny(ray, t_min, t_max));
+			}
+
+			Color	shadowTransmittance(Ray& ray, double t_min, double t_max) const override
+			{
+				return (this->hittable()->shadowTransmittance(ray, t_min, t_max));
 			}
 
 			bool	createBoundingBox(AABB& outputBoundingBox) const override
@@ -487,6 +496,135 @@ namespace
 		std::optional<Color>	absorptionCoefficient;
 		std::shared_ptr<Material>	material = nullptr;
 	};
+
+	struct CloudBlock
+	{
+		std::string	type = "cumulus";
+		std::optional<Vector3>	position;
+		std::optional<Vector3>	size;
+		std::optional<double>	width;
+		std::optional<double>	height;
+		std::optional<double>	depth;
+		std::optional<double>	coverage;
+		std::optional<double>	extinction;
+		std::optional<Color>	albedo;
+		std::optional<double>	anisotropy;
+		std::optional<double>	backscatter;
+		std::optional<double>	forwardWeight;
+		std::optional<double>	dropletSizeMicrons;
+		std::optional<double>	featureScale;
+		std::optional<double>	macroScale;
+		std::optional<double>	detail;
+		std::optional<double>	erosion;
+		std::optional<double>	puffiness;
+		std::optional<double>	towering;
+		std::optional<double>	dominance;
+		std::optional<double>	overhang;
+		std::optional<double>	fineDetail;
+		std::optional<double>	multipleScatteringFalloff;
+		std::optional<double>	multipleScatteringCompensation;
+		std::optional<Vector3>	shearDirection;
+		std::optional<std::uint32_t>	seed;
+		std::optional<Vector3>	offset;
+		std::optional<int>	detailOctaves;
+		std::optional<int>	maxTrackingSteps;
+		std::optional<double> directionalCacheResolution, primaryDetail, weatherVariation, baseVariation;
+		std::optional<int> localMajorants;
+		std::string	quality;
+	};
+
+	struct GridVolumeBlock
+	{
+		std::string fileName;
+		std::optional<Vector3> position;
+		std::optional<Vector3> rotationDegrees;
+		std::optional<Vector3> size;
+		std::optional<double> extinction;
+		std::optional<double> densityThreshold;
+		std::optional<double> densityGamma;
+		std::optional<Color> albedo;
+		std::optional<double> anisotropy;
+		std::optional<double> backscatter;
+		std::optional<double> forwardWeight;
+		std::optional<double> dropletSizeMicrons;
+		std::optional<double> multipleScatteringFalloff;
+		std::optional<double> multipleScatteringCompensation;
+		std::optional<int> shadowSamplesPerBrick;
+		std::optional<double> primaryDetail;
+		std::optional<int> directionalCache;
+		std::string quality;
+	};
+
+	double parseCloudDouble(
+		const std::string& value,
+		const std::string& cloudName,
+		const std::string& key
+	)
+	{
+		std::size_t consumed = 0;
+		try
+		{
+			const double parsed = std::stod(value, &consumed);
+			if (consumed != value.size())
+				throw std::invalid_argument("trailing characters");
+			return (parsed);
+		}
+		catch (const std::exception&)
+		{
+			throw std::runtime_error(
+				"Cloud '" + cloudName + "' property '" + key
+				+ "' requires a complete floating-point value, got '" + value + "'."
+			);
+		}
+	}
+
+	int parseCloudInteger(
+		const std::string& value,
+		const std::string& cloudName,
+		const std::string& key
+	)
+	{
+		std::size_t consumed = 0;
+		try
+		{
+			const long long parsed = std::stoll(value, &consumed, 10);
+			if (
+				consumed != value.size()
+				|| parsed < std::numeric_limits<int>::min()
+				|| parsed > std::numeric_limits<int>::max()
+			)
+				throw std::invalid_argument("invalid integer");
+			return (static_cast<int>(parsed));
+		}
+		catch (const std::exception&)
+		{
+			throw std::runtime_error(
+				"Cloud '" + cloudName + "' property '" + key
+				+ "' requires a complete integer value, got '" + value + "'."
+			);
+		}
+	}
+
+	std::uint32_t parseCloudSeed(const std::string& value, const std::string& cloudName)
+	{
+		std::size_t consumed = 0;
+		try
+		{
+			if (!value.empty() && value.front() == '-')
+				throw std::invalid_argument("negative seed");
+			const unsigned long long parsed = std::stoull(value, &consumed, 10);
+			if (consumed != value.size() || parsed > std::numeric_limits<std::uint32_t>::max())
+				throw std::invalid_argument("invalid seed");
+			return (static_cast<std::uint32_t>(parsed));
+		}
+		catch (const std::exception&)
+		{
+			throw std::runtime_error(
+				"Cloud '" + cloudName + "' property 'seed' requires an unsigned 32-bit integer, got '"
+				+ value + "'."
+			);
+		}
+	}
 
 	void	requirePositiveFinite(double value, const std::string& description)
 	{
@@ -1335,6 +1473,312 @@ namespace
 		throw std::runtime_error("Volume '" + volumeName + "' is missing a closing }.");
 	}
 
+	void	addCloudBlock(Scene& scene, std::ifstream& stream, SceneFile::internal::SceneFileContext& context, const std::string& cloudName)
+	{
+		std::string line;
+		CloudBlock cloud;
+
+		do
+		{
+			getline(stream, line);
+			const std::string blockLine = SceneFile::internal::_trim(line);
+
+			if (blockLine.empty() || blockLine.at(0) == '#')
+				continue;
+			if (blockLine == "}")
+			{
+				CloudParameters parameters = CloudVolume::preset(CloudVolume::parseType(cloud.type));
+				if (cloud.position) parameters.position = *cloud.position;
+				if (cloud.size) parameters.size = *cloud.size;
+				if (cloud.width) parameters.size.setX(*cloud.width);
+				if (cloud.height) parameters.size.setY(*cloud.height);
+				if (cloud.depth) parameters.size.setZ(*cloud.depth);
+				if (cloud.coverage) parameters.coverage = *cloud.coverage;
+				if (cloud.extinction) parameters.extinction = *cloud.extinction;
+				if (cloud.albedo) parameters.albedo = *cloud.albedo;
+				if (cloud.anisotropy) parameters.anisotropy = *cloud.anisotropy;
+				if (cloud.backscatter) parameters.backscatter = *cloud.backscatter;
+				if (cloud.forwardWeight) parameters.forwardWeight = *cloud.forwardWeight;
+				if (cloud.dropletSizeMicrons) parameters.dropletSizeMicrons = *cloud.dropletSizeMicrons;
+				if (cloud.featureScale) parameters.featureScale = *cloud.featureScale;
+				if (cloud.macroScale) parameters.macroScale = *cloud.macroScale;
+				if (cloud.detail) parameters.detail = *cloud.detail;
+				if (cloud.erosion) parameters.erosion = *cloud.erosion;
+				if (cloud.puffiness) parameters.puffiness = *cloud.puffiness;
+				if (cloud.towering) parameters.towering = *cloud.towering;
+				if (cloud.dominance) parameters.dominance = *cloud.dominance;
+				if (cloud.overhang) parameters.overhang = *cloud.overhang;
+				if (cloud.fineDetail) parameters.fineDetail = *cloud.fineDetail;
+				if (cloud.multipleScatteringFalloff)
+					parameters.multipleScatteringFalloff = *cloud.multipleScatteringFalloff;
+				if (cloud.multipleScatteringCompensation)
+					parameters.multipleScatteringCompensation = *cloud.multipleScatteringCompensation;
+				if (cloud.shearDirection) parameters.shearDirection = *cloud.shearDirection;
+				if (cloud.seed) parameters.seed = *cloud.seed;
+				if (cloud.offset) parameters.offset = *cloud.offset;
+				if (cloud.detailOctaves) parameters.detailOctaves = *cloud.detailOctaves;
+				if (cloud.maxTrackingSteps) parameters.maxTrackingSteps = *cloud.maxTrackingSteps;
+				if (!cloud.quality.empty())
+				{
+					const std::string quality = SceneFile::internal::_lowerCopy(cloud.quality);
+					if (quality == "preview")
+					{
+						if (!cloud.primaryDetail) parameters.primaryDetail = 0.5;
+						if (!cloud.maxTrackingSteps) parameters.maxTrackingSteps = 128;
+					}
+					else if (quality == "production" || quality == "final")
+					{
+						if (!cloud.maxTrackingSteps) parameters.maxTrackingSteps = 512;
+					}
+					else if (quality == "cinematic")
+					{
+						if (!cloud.primaryDetail) parameters.primaryDetail = 2.0;
+						if (!cloud.maxTrackingSteps) parameters.maxTrackingSteps = 1024;
+					}
+					else
+						throw std::runtime_error("Cloud '" + cloudName + "' quality must be preview, production, or cinematic.");
+				}
+				if (cloud.directionalCacheResolution) parameters.directionalCacheResolution = *cloud.directionalCacheResolution;
+				if (cloud.primaryDetail) parameters.primaryDetail = *cloud.primaryDetail;
+				if (cloud.weatherVariation) parameters.weatherVariation = *cloud.weatherVariation;
+				if (cloud.baseVariation) parameters.baseVariation = *cloud.baseVariation;
+				if (cloud.localMajorants)
+				{
+					if (*cloud.localMajorants != 0 && *cloud.localMajorants != 1)
+						throw std::runtime_error("tracking_majorants must be zero or one.");
+					parameters.localMajorants = *cloud.localMajorants != 0;
+				}
+				parameters.metersPerUnit = scene.getMetersPerUnit();
+				scene.addHittable(std::make_shared<CloudVolume>(parameters));
+				return;
+			}
+
+			std::string key;
+			std::string value;
+			if (!splitAssignment(blockLine, key, value))
+				throw std::runtime_error("Invalid cloud property: " + blockLine);
+
+			if (key == "type" || key == "preset")
+				cloud.type = value;
+			else if (key == "position" || key == "center")
+				cloud.position = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "size" || key == "dimensions")
+				cloud.size = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "width")
+				cloud.width = parseCloudDouble(value, cloudName, key);
+			else if (key == "height")
+				cloud.height = parseCloudDouble(value, cloudName, key);
+			else if (key == "depth")
+				cloud.depth = parseCloudDouble(value, cloudName, key);
+			else if (key == "coverage")
+				cloud.coverage = parseCloudDouble(value, cloudName, key);
+			else if (key == "extinction" || key == "density" || key == "sigma_t")
+				cloud.extinction = parseCloudDouble(value, cloudName, key);
+			else if (key == "albedo" || key == "color" || key == "scattering_color" || key == "scatteringcolor")
+				cloud.albedo = SceneFile::internal::_parseColorValue(value, key, context);
+			else if (key == "anisotropy" || key == "g")
+				cloud.anisotropy = parseCloudDouble(value, cloudName, key);
+			else if (key == "backscatter" || key == "backscatter_anisotropy" || key == "backscatteranisotropy")
+				cloud.backscatter = parseCloudDouble(value, cloudName, key);
+			else if (key == "forward_weight" || key == "forwardweight" || key == "phase_mix" || key == "phasemix")
+				cloud.forwardWeight = parseCloudDouble(value, cloudName, key);
+			else if (key == "droplet_size" || key == "dropletsize" || key == "droplet_size_microns")
+				cloud.dropletSizeMicrons = parseCloudDouble(value, cloudName, key);
+			else if (key == "feature_scale" || key == "featurescale" || key == "noise_scale" || key == "noisescale" || key == "scale")
+				cloud.featureScale = parseCloudDouble(value, cloudName, key);
+			else if (key == "macro_scale" || key == "macroscale" || key == "formation_scale" || key == "formationscale")
+				cloud.macroScale = parseCloudDouble(value, cloudName, key);
+			else if (key == "detail")
+				cloud.detail = parseCloudDouble(value, cloudName, key);
+			else if (key == "erosion")
+				cloud.erosion = parseCloudDouble(value, cloudName, key);
+			else if (key == "puffiness" || key == "billowing" || key == "billow")
+				cloud.puffiness = parseCloudDouble(value, cloudName, key);
+			else if (key == "towering" || key == "vertical_growth" || key == "verticalgrowth" || key == "convection")
+				cloud.towering = parseCloudDouble(value, cloudName, key);
+			else if (key == "dominance" || key == "hero" || key == "thermal_dominance" || key == "thermaldominance")
+				cloud.dominance = parseCloudDouble(value, cloudName, key);
+			else if (key == "overhang" || key == "crown" || key == "crown_spread" || key == "crownspread")
+				cloud.overhang = parseCloudDouble(value, cloudName, key);
+			else if (key == "fine_detail" || key == "finedetail" || key == "micro_detail" || key == "microdetail")
+				cloud.fineDetail = parseCloudDouble(value, cloudName, key);
+			else if (
+				key == "multiple_scattering_falloff"
+				|| key == "multiplescatteringfalloff"
+				|| key == "scatter_falloff"
+				|| key == "scatterfalloff"
+			)
+				cloud.multipleScatteringFalloff = parseCloudDouble(value, cloudName, key);
+			else if (
+				key == "multiple_scattering_compensation"
+				|| key == "multiplescatteringcompensation"
+				|| key == "scatter_compensation"
+				|| key == "scattercompensation"
+			)
+				cloud.multipleScatteringCompensation = parseCloudDouble(value, cloudName, key);
+			else if (key == "shear_direction" || key == "sheardirection" || key == "wind_direction" || key == "winddirection")
+				cloud.shearDirection = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "seed")
+				cloud.seed = parseCloudSeed(value, cloudName);
+			else if (key == "offset" || key == "noise_offset" || key == "noiseoffset")
+				cloud.offset = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "detail_octaves" || key == "detailoctaves" || key == "octaves")
+				cloud.detailOctaves = parseCloudInteger(value, cloudName, key);
+			else if (key == "max_steps" || key == "maxsteps" || key == "tracking_steps" || key == "trackingsteps")
+				cloud.maxTrackingSteps = parseCloudInteger(value, cloudName, key);
+			else if (key == "directional_cache_resolution")
+				cloud.directionalCacheResolution = parseCloudDouble(value, cloudName, key);
+			else if (key == "primary_detail")
+				cloud.primaryDetail = parseCloudDouble(value, cloudName, key);
+			else if (key == "weather_variation")
+				cloud.weatherVariation = parseCloudDouble(value, cloudName, key);
+			else if (key == "base_variation")
+				cloud.baseVariation = parseCloudDouble(value, cloudName, key);
+			else if (key == "tracking_majorants")
+				cloud.localMajorants = parseCloudInteger(value, cloudName, key);
+			else if (key == "quality")
+				cloud.quality = value;
+			else
+				throw std::runtime_error("Unknown cloud property: " + blockLine);
+		} while (!stream.eof());
+
+		throw std::runtime_error("Cloud '" + cloudName + "' is missing a closing }.");
+	}
+
+	void addGridVolumeBlock(
+		Scene& scene,
+		std::ifstream& stream,
+		SceneFile::internal::SceneFileContext& context,
+		const std::string& volumeName
+	)
+	{
+		std::string line;
+		GridVolumeBlock volume;
+		do
+		{
+			getline(stream, line);
+			const std::string blockLine = SceneFile::internal::_trim(line);
+			if (blockLine.empty() || blockLine.at(0) == '#')
+				continue;
+			if (blockLine == "}")
+			{
+				if (volume.fileName.empty())
+					throw std::runtime_error("Grid volume '" + volumeName + "' requires a file.");
+				GridVolumeParameters parameters;
+				parameters.fileName = SceneFile::internal::_resolveAssetPath(
+					context.baseDirectory,
+					volume.fileName
+				);
+				if (volume.position) parameters.position = *volume.position;
+				if (volume.rotationDegrees) parameters.rotationDegrees = *volume.rotationDegrees;
+				if (volume.size) parameters.size = *volume.size;
+				if (volume.extinction) parameters.extinction = *volume.extinction;
+				if (volume.densityThreshold) parameters.densityThreshold = *volume.densityThreshold;
+				if (volume.densityGamma) parameters.densityGamma = *volume.densityGamma;
+				if (volume.albedo) parameters.albedo = *volume.albedo;
+				if (volume.anisotropy) parameters.anisotropy = *volume.anisotropy;
+				if (volume.backscatter) parameters.backscatter = *volume.backscatter;
+				if (volume.forwardWeight) parameters.forwardWeight = *volume.forwardWeight;
+				if (volume.dropletSizeMicrons) parameters.dropletSizeMicrons = *volume.dropletSizeMicrons;
+				if (volume.multipleScatteringFalloff)
+					parameters.multipleScatteringFalloff = *volume.multipleScatteringFalloff;
+				if (volume.multipleScatteringCompensation)
+					parameters.multipleScatteringCompensation = *volume.multipleScatteringCompensation;
+				if (!volume.quality.empty())
+				{
+					const std::string quality = SceneFile::internal::_lowerCopy(volume.quality);
+					if (quality == "preview")
+					{
+						parameters.shadowSamplesPerBrick = 2;
+						parameters.primaryDetail = 0.5;
+					}
+					else if (quality == "production")
+					{
+						parameters.shadowSamplesPerBrick = 4;
+						parameters.primaryDetail = 1.0;
+					}
+					else if (quality == "cinematic")
+					{
+						parameters.shadowSamplesPerBrick = 8;
+						parameters.primaryDetail = 2.0;
+					}
+					else if (quality == "final")
+					{
+						parameters.shadowSamplesPerBrick = 12;
+						parameters.primaryDetail = 8.0;
+					}
+					else if (quality == "reference")
+					{
+						parameters.shadowSamplesPerBrick = 16;
+						parameters.primaryDetail = 16.0;
+					}
+					else
+						throw std::runtime_error("Grid volume '" + volumeName
+							+ "' quality must be preview, production, cinematic, final, or reference.");
+				}
+				if (volume.shadowSamplesPerBrick)
+					parameters.shadowSamplesPerBrick = *volume.shadowSamplesPerBrick;
+				if (volume.primaryDetail)
+					parameters.primaryDetail = *volume.primaryDetail;
+				if (volume.directionalCache)
+				{
+					if (*volume.directionalCache != 0 && *volume.directionalCache != 1)
+						throw std::runtime_error("directional_cache must be zero or one.");
+					parameters.directionalCache = *volume.directionalCache != 0;
+				}
+				parameters.metersPerUnit = scene.getMetersPerUnit();
+				scene.addHittable(std::make_shared<SparseGridVolume>(parameters));
+				return;
+			}
+
+			std::string key;
+			std::string value;
+			if (!splitAssignment(blockLine, key, value))
+				throw std::runtime_error("Invalid grid volume property: " + blockLine);
+			if (key == "file" || key == "source" || key == "path")
+				volume.fileName = value;
+			else if (key == "position" || key == "center")
+				volume.position = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "rotation" || key == "rotation_degrees" || key == "orientation")
+				volume.rotationDegrees = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "size" || key == "dimensions")
+				volume.size = SceneFile::internal::_parseVector3Value(value, key);
+			else if (key == "extinction" || key == "density" || key == "sigma_t" || key == "density_scale")
+				volume.extinction = parseCloudDouble(value, volumeName, key);
+			else if (key == "density_threshold" || key == "densitythreshold"
+				|| key == "density_cutoff" || key == "densitycutoff" || key == "threshold")
+				volume.densityThreshold = parseCloudDouble(value, volumeName, key);
+			else if (key == "density_gamma" || key == "densitygamma"
+				|| key == "density_contrast" || key == "densitycontrast")
+				volume.densityGamma = parseCloudDouble(value, volumeName, key);
+			else if (key == "albedo" || key == "color" || key == "scattering_color" || key == "scatteringcolor")
+				volume.albedo = SceneFile::internal::_parseColorValue(value, key, context);
+			else if (key == "anisotropy" || key == "g")
+				volume.anisotropy = parseCloudDouble(value, volumeName, key);
+			else if (key == "backscatter" || key == "backscatter_anisotropy")
+				volume.backscatter = parseCloudDouble(value, volumeName, key);
+			else if (key == "forward_weight" || key == "forwardweight" || key == "phase_mix")
+				volume.forwardWeight = parseCloudDouble(value, volumeName, key);
+			else if (key == "droplet_size" || key == "dropletsize" || key == "droplet_size_microns")
+				volume.dropletSizeMicrons = parseCloudDouble(value, volumeName, key);
+			else if (key == "multiple_scattering_falloff" || key == "scatter_falloff")
+				volume.multipleScatteringFalloff = parseCloudDouble(value, volumeName, key);
+			else if (key == "multiple_scattering_compensation" || key == "scatter_compensation")
+				volume.multipleScatteringCompensation = parseCloudDouble(value, volumeName, key);
+			else if (key == "shadow_samples_per_brick" || key == "shadowsamplesperbrick" || key == "shadow_quality")
+				volume.shadowSamplesPerBrick = parseCloudInteger(value, volumeName, key);
+			else if (key == "primary_detail" || key == "primarydetail" || key == "control_detail" || key == "controldetail")
+				volume.primaryDetail = parseCloudDouble(value, volumeName, key);
+			else if (key == "directional_cache")
+				volume.directionalCache = parseCloudInteger(value, volumeName, key);
+			else if (key == "quality")
+				volume.quality = value;
+			else
+				throw std::runtime_error("Unknown grid volume property: " + blockLine);
+		} while (!stream.eof());
+		throw std::runtime_error("Grid volume '" + volumeName + "' is missing a closing }.");
+	}
+
 	bool	addSceneObjectOrLightBlock(Scene& scene, std::ifstream& stream, SceneFile::internal::SceneFileContext& context, const std::string& line)
 	{
 		std::string blockName;
@@ -1364,6 +1808,20 @@ namespace
 			addVolumeBlock(scene, stream, context, blockName);
 			return (true);
 		}
+		if (SceneFile::internal::_parseNamedBlockHeader(line, "cloud", blockName))
+		{
+			addCloudBlock(scene, stream, context, blockName);
+			return (true);
+		}
+		if (
+			SceneFile::internal::_parseNamedBlockHeader(line, "volume_grid", blockName)
+			|| SceneFile::internal::_parseNamedBlockHeader(line, "grid_volume", blockName)
+			|| SceneFile::internal::_parseNamedBlockHeader(line, "vdb_volume", blockName)
+		)
+		{
+			addGridVolumeBlock(scene, stream, context, blockName);
+			return (true);
+		}
 		if (
 			SceneFile::internal::_parseNamedBlockHeader(line, "sphere_light", blockName)
 			|| SceneFile::internal::_parseNamedBlockHeader(line, "point_light", blockName)
@@ -1380,6 +1838,10 @@ namespace
 			|| lowerLine.rfind("area_light ", 0) == 0
 			|| lowerLine.rfind("directional_light ", 0) == 0
 			|| lowerLine.rfind("volume ", 0) == 0
+			|| lowerLine.rfind("cloud ", 0) == 0
+			|| lowerLine.rfind("volume_grid ", 0) == 0
+			|| lowerLine.rfind("grid_volume ", 0) == 0
+			|| lowerLine.rfind("vdb_volume ", 0) == 0
 			|| lowerLine.rfind("sphere_light ", 0) == 0
 			|| lowerLine.rfind("point_light ", 0) == 0
 		)

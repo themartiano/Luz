@@ -4,6 +4,7 @@
 #include "Scene/SceneHelpers.hpp"
 #include "Defaults.hpp"
 #include "Utilities.hpp"
+#include "Clock.hpp"
 #include <algorithm>
 #include <unistd.h>
 #include <stdexcept>
@@ -52,6 +53,10 @@ namespace
 			<< "  --adaptive [true|false]     Toggle adaptive sampling (default: true)\n"
 			<< "  --no-adaptive               Disable adaptive sampling\n"
 			<< "  --adaptive-min-samples N    Minimum samples before adaptive stopping\n"
+			<< "  --adaptive-background-min-samples N\n"
+			<< "                               Background floor (0 inherits adaptive minimum)\n"
+			<< "  --adaptive-volume-min-samples N\n"
+			<< "                               Volume floor (0 inherits adaptive minimum)\n"
 			<< "  --adaptive-threshold F      Relative adaptive noise threshold\n"
 			<< "  --adaptive-check-interval N Adaptive convergence check interval\n"
 			<< "  -mlb, --maxLightBounces N   Override maximum light bounces\n"
@@ -90,11 +95,17 @@ void	FlagsParser::parse(Scene& scene)
 	this->_parseHelp();
 	this->_rejectRemovedFlags();
 	this->_parseSeed();
+	if (this->_findFlag("--benchmark") != this->_args.end())
+	{
+		scene.setBenchmarkMode(true);
+	}
 	this->_parseFile(scene);
 	this->_parseBenchmark(scene);
 	this->_parseSamples(scene);
 	this->_parseAdaptiveSampling(scene);
 	this->_parseAdaptiveMinSamples(scene);
+	this->_parseAdaptiveBackgroundMinSamples(scene);
+	this->_parseAdaptiveVolumeMinSamples(scene);
 	this->_parseAdaptiveThreshold(scene);
 	this->_parseAdaptiveCheckInterval(scene);
 	this->_parseMaxLightBounces(scene);
@@ -180,6 +191,8 @@ FlagsParser::_iterator	FlagsParser::_findPositionalFile(void)
 		"--benchmark-case",
 		"--samples", "-s",
 		"--adaptive-min-samples",
+		"--adaptive-background-min-samples",
+		"--adaptive-volume-min-samples",
 		"--adaptive-threshold",
 		"--adaptive-check-interval",
 		"--maxLightBounces", "--max-light-bounces", "-mlb",
@@ -272,10 +285,12 @@ void	FlagsParser::_parseFile(Scene& scene)
 void	FlagsParser::_parseBenchmark(Scene& scene)
 {
 	auto it = this->_findFlag("--benchmark");
+
 	if (it != this->_args.end())
 	{
 		std::string benchmarkCase = "default";
 		auto caseIt = this->_findFlag("--benchmark-case");
+
 		if (caseIt != this->_args.end())
 		{
 			if (caseIt + 1 == this->_args.end())
@@ -292,20 +307,25 @@ void	FlagsParser::_parseBenchmark(Scene& scene)
 		}
 		scene.setIsFromFile(true); // We simulate that it read a scene file.
 
+		Clock sceneBuildClock;
+		sceneBuildClock.start();
 		SceneHelpers::benchmark(scene, benchmarkCase);
 
 		scene.getImage()->setWidth(200);
 		scene.getImage()->setHeight(200);
-	scene.getImage()->initialize();
-	scene.setSampleCount(50);
-	scene.setMaxLightBounces(8);
-	scene.setViewTransform(ViewTransform::AgX);
-	if (benchmarkCase != "atmosphere")
-	{
+		scene.getImage()->initialize();
+		scene.setSampleCount(50);
+		scene.setMaxLightBounces(8);
+		scene.setViewTransform(ViewTransform::AgX);
+		if (benchmarkCase != "atmosphere")
+		{
 			scene.setRenderSky(SKY_NONE);
 		}
 		scene.setDistanceBlueness(false);
 		scene.setBackgroundColor(Color(0.0, 0.0, 0.0));
+		SceneRenderStats stats = scene.getRenderStats();
+		stats.sceneBuildMS += sceneBuildClock.elapsedMS();
+		scene.setRenderStats(stats);
 	}
 }
 
@@ -361,6 +381,32 @@ void	FlagsParser::_parseAdaptiveMinSamples(Scene& scene)
 			throw std::runtime_error("--adaptive-min-samples requires a value.");
 		}
 		scene.setAdaptiveMinSamples(std::stoi(*(it + 1)));
+	}
+}
+
+void	FlagsParser::_parseAdaptiveBackgroundMinSamples(Scene& scene)
+{
+	auto it = this->_findFlag("--adaptive-background-min-samples");
+	if (it != this->_args.end())
+	{
+		if (it + 1 == this->_args.end())
+		{
+			throw std::runtime_error("--adaptive-background-min-samples requires a value.");
+		}
+		scene.setAdaptiveBackgroundMinSamples(std::stoi(*(it + 1)));
+	}
+}
+
+void	FlagsParser::_parseAdaptiveVolumeMinSamples(Scene& scene)
+{
+	auto it = this->_findFlag("--adaptive-volume-min-samples");
+	if (it != this->_args.end())
+	{
+		if (it + 1 == this->_args.end())
+		{
+			throw std::runtime_error("--adaptive-volume-min-samples requires a value.");
+		}
+		scene.setAdaptiveVolumeMinSamples(std::stoi(*(it + 1)));
 	}
 }
 

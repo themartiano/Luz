@@ -24,6 +24,7 @@
 #include "FlagsParser.hpp"
 #include "Scene/SceneHelpers.hpp"
 #include "Random.hpp"
+#include "Clock.hpp"
 #include <filesystem>
 #include <memory>
 #include <exception>
@@ -124,6 +125,9 @@ int	main(int argc, char *argv[])
 		FlagsParser(argc, argv).parse(scene);
 		if (!scene.getIsFromFile())
 		{
+			Clock sceneBuildClock;
+
+			sceneBuildClock.start();
 			scene.getImage()->setWidth(500);
 			scene.getImage()->setHeight(500);
 			scene.getImage()->initialize();
@@ -187,6 +191,9 @@ int	main(int argc, char *argv[])
 			// 	10.0,
 			// 	std::make_shared<Lambertian>(Color(1.0, 1.0, 1.0))
 			// ));
+			SceneRenderStats stats = scene.getRenderStats();
+			stats.sceneBuildMS += sceneBuildClock.elapsedMS();
+			scene.setRenderStats(stats);
 		}
 
 		if (Renderer::render(scene))

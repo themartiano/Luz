@@ -197,6 +197,24 @@ void	SceneFile::internal::_readSettingsSection(Scene& scene, std::ifstream& stre
 			scene.getImage()->setHeight(static_cast<std::size_t>(y));
 			scene.getImage()->initialize();
 		}
+		else if (lowerLine.rfind("volume_primary_samples=", 0) == 0
+			|| lowerLine.rfind("volume_primary_max_steps=", 0) == 0
+			|| lowerLine.rfind("volume_reference=", 0) == 0)
+		{
+			const double parsed = parseFiniteDouble(settingValue(line, "Missing volume setting value."), "Volume setting");
+			if (parsed < 0.0 || parsed > 65536.0 || parsed != std::floor(parsed))
+				throw std::runtime_error("Volume settings require an integer in range.");
+			const int value = static_cast<int>(parsed);
+			if (lowerLine.rfind("volume_primary_samples=", 0) == 0)
+				scene.setVolumePrimarySamples(value);
+			else if (lowerLine.rfind("volume_primary_max_steps=", 0) == 0)
+				scene.setVolumePrimaryMaxSteps(value);
+			else
+			{
+				requireBinarySetting(value, "volume_reference");
+				scene.setVolumeReference(value != 0);
+			}
+		}
 		else if (lowerLine.rfind("samples=", 0) != std::string::npos)
 		{
 			int samples;
@@ -236,6 +254,38 @@ void	SceneFile::internal::_readSettingsSection(Scene& scene, std::ifstream& stre
 			scene.setAdaptiveMinSamples(adaptiveMinSamples);
 		}
 		else if (
+			lowerLine.rfind("adaptivebackgroundminsamples=", 0) != std::string::npos
+			|| lowerLine.rfind("adaptive_background_min_samples=", 0) != std::string::npos
+		)
+		{
+			int adaptiveBackgroundMinSamples;
+
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%d", &adaptiveBackgroundMinSamples) != 1)
+			{
+				throw std::runtime_error(
+					"Invalid adaptive background minimum samples setting. "
+					"Use adaptivebackgroundminsamples=N."
+				);
+			}
+			scene.setAdaptiveBackgroundMinSamples(adaptiveBackgroundMinSamples);
+		}
+		else if (
+			lowerLine.rfind("adaptivevolumeminsamples=", 0) != std::string::npos
+			|| lowerLine.rfind("adaptive_volume_min_samples=", 0) != std::string::npos
+		)
+		{
+			int adaptiveVolumeMinSamples;
+
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%d", &adaptiveVolumeMinSamples) != 1)
+			{
+				throw std::runtime_error(
+					"Invalid adaptive volume minimum samples setting. "
+					"Use adaptivevolumeminsamples=N."
+				);
+			}
+			scene.setAdaptiveVolumeMinSamples(adaptiveVolumeMinSamples);
+		}
+		else if (
 			lowerLine.rfind("adaptivethreshold=", 0) != std::string::npos
 			|| lowerLine.rfind("adaptive_threshold=", 0) != std::string::npos
 		)
@@ -270,6 +320,66 @@ void	SceneFile::internal::_readSettingsSection(Scene& scene, std::ifstream& stre
 				throw std::runtime_error("Invalid maxlightbounces setting. Use maxlightbounces=N.");
 			}
 			scene.setMaxLightBounces(maxLightBounces);
+		}
+		else if (
+			lowerLine.rfind("volume_guiding_samples=", 0) != std::string::npos
+			|| lowerLine.rfind("volumeguidingsamples=", 0) != std::string::npos
+		)
+		{
+			int samples;
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%d", &samples) != 1)
+				throw std::runtime_error("Invalid volume guiding samples setting. Use volume_guiding_samples=N.");
+			scene.setVolumeGuidingTrainingSamples(samples);
+		}
+		else if (
+			lowerLine.rfind("volume_guiding_resolution=", 0) != std::string::npos
+			|| lowerLine.rfind("volumeguidingresolution=", 0) != std::string::npos
+		)
+		{
+			unsigned int resolution;
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%u", &resolution) != 1)
+				throw std::runtime_error("Invalid volume guiding resolution setting. Use volume_guiding_resolution=N.");
+			scene.setVolumeGuidingResolution(resolution);
+		}
+		else if (
+			lowerLine.rfind("volume_guiding_lobes=", 0) != std::string::npos
+			|| lowerLine.rfind("volumeguidinglobes=", 0) != std::string::npos
+		)
+		{
+			unsigned int lobes;
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%u", &lobes) != 1)
+				throw std::runtime_error("Invalid volume guiding lobes setting. Use volume_guiding_lobes=N.");
+			scene.setVolumeGuidingLobes(lobes);
+		}
+		else if (
+			lowerLine.rfind("volume_guiding_anisotropy=", 0) != std::string::npos
+			|| lowerLine.rfind("volumeguidinganisotropy=", 0) != std::string::npos
+		)
+		{
+			double anisotropy;
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%lf", &anisotropy) != 1)
+				throw std::runtime_error("Invalid volume guiding anisotropy setting. Use volume_guiding_anisotropy=F.");
+			scene.setVolumeGuidingAnisotropy(anisotropy);
+		}
+		else if (
+			lowerLine.rfind("volume_guiding_strength=", 0) != std::string::npos
+			|| lowerLine.rfind("volumeguidingstrength=", 0) != std::string::npos
+		)
+		{
+			double strength;
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%lf", &strength) != 1)
+				throw std::runtime_error("Invalid volume guiding strength setting. Use volume_guiding_strength=F.");
+			scene.setVolumeGuidingStrength(strength);
+		}
+		else if (
+			lowerLine.rfind("volume_guiding_start_bounce=", 0) != std::string::npos
+			|| lowerLine.rfind("volumeguidingstartbounce=", 0) != std::string::npos
+		)
+		{
+			int startBounce;
+			if (sscanf(lowerLine.c_str(), "%*[^=]=%d", &startBounce) != 1)
+				throw std::runtime_error("Invalid volume guiding start bounce setting. Use volume_guiding_start_bounce=N.");
+			scene.setVolumeGuidingStartBounce(startBounce);
 		}
 		else if (lowerLine.rfind("view_transform=", 0) != std::string::npos)
 		{

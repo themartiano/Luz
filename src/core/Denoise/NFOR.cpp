@@ -1,4 +1,5 @@
 #include "Denoise/NFOR.hpp"
+#include "Materials/MaterialTypes.hpp"
 #include "Utilities.hpp"
 #include <algorithm>
 #include <array>
@@ -98,6 +99,15 @@ namespace
 			return (0.0);
 		}
 		return (luminance);
+	}
+	double	smoothStep(double edge0, double edge1, double value)
+	{
+		if (edge1 <= edge0)
+		{
+			return (value >= edge1 ? 1.0 : 0.0);
+		}
+		const double t = std::clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
+		return (t * t * (3.0 - 2.0 * t));
 	}
 
 	Color	medianColorByLuminance(std::vector<Color>& colors)
@@ -315,6 +325,7 @@ namespace
 
 		return (std::exp(-distance / bandwidthSquared));
 	}
+
 
 	double	colorWeight(
 		const std::vector<Color>& guide,
@@ -948,6 +959,185 @@ namespace
 		}
 		return (selection);
 	}
+
+	bool	isVolumeFeature(const Denoise::FeatureVector& feature)
+	{
+		if (feature[2] < 0.5)
+			return (false);
+		const double isotropic = static_cast<double>(ISOTROPIC)
+			/ static_cast<double>(PRINCIPLED);
+		const double henyeyGreenstein = static_cast<double>(HENYEY_GREENSTEIN)
+			/ static_cast<double>(PRINCIPLED);
+		return (
+			std::fabs(feature[10] - isotropic) < 0.04
+			|| std::fabs(feature[10] - henyeyGreenstein) < 0.04
+		);
+	}
+
+	std::vector<Color>	reconstructVolumeResidual(
+		const std::vector<Color>& stochasticColor,
+		const std::vector<Color>& surfaceResult,
+		const std::vector<Denoise::FeatureVector>& features,
+		const std::vector<Color>& deterministicColor,
+		const std::vector<double>& volumeOpacity,
+		const std::vector<double>& colorVariance,
+		const std::vector<unsigned int>& sampleCount,
+		std::size_t width,
+		std::size_t height,
+		std::size_t threadCount
+	)
+	{
+		if (
+			deterministicColor.size() != stochasticColor.size()
+			|| volumeOpacity.size() != stochasticColor.size()
+			|| colorVariance.size() != stochasticColor.size()
+			|| sampleCount.size() != stochasticColor.size()
+		)
+			return (surfaceResult);
+		std::vector<unsigned char> volumeMask(stochasticColor.size(), 0);
+		bool hasVolumes = false;
+		for (std::size_t i = 0; i < volumeMask.size(); i++)
+		{
+			volumeMask[i] = (
+				isVolumeFeature(features[i])
+				|| volumeOpacity[i] > 1e-5
+			) ? 1 : 0;
+			hasVolumes = hasVolumes || volumeMask[i] != 0;
+		}
+		if (!hasVolumes)
+			return (surfaceResult);
+
+		// Multiple scattering is a low-frequency diffusion signal. Polynomial
+		// surface regression can hallucinate coherent curves from its enormous
+		// low-spp variance, so reconstruct it with an edge-aware a-trous filter.
+		// The separately integrated direct-light layer is the radiance guide and
+		// is added only after this pass, preserving sharp silver linings and lobes.
+		constexpr std::array<double, 5> kernel = {1.0, 4.0, 6.0, 4.0, 1.0};
+		constexpr unsigned int varianceRampStartSPP = 32;
+		constexpr unsigned int varianceRampEndSPP = 96;
+		std::vector<Color> current = stochasticColor;
+		std::vector<Color> next = current;
+		for (int iteration = 0; iteration < 3; iteration++)
+		{
+			const long long stride = 1LL << iteration;
+			parallelRows(height, threadCount, [&](std::size_t startY, std::size_t stopY)
+			{
+				for (std::size_t y = startY; y < stopY; y++)
+				{
+					for (std::size_t x = 0; x < width; x++)
+					{
+						const std::size_t center = y * width + x;
+						if (!volumeMask[center])
+						{
+							next[center] = surfaceResult[center];
+							continue;
+						}
+						Color sum(0.0, 0.0, 0.0);
+						double totalWeight = 0.0;
+						const double centerDepth = features[center][3];
+						const double centerDensity = features[center][7];
+						const double centerOpacity = volumeOpacity[center];
+						const double centerGuide = colorLuminance(deterministicColor[center]);
+						for (long long ky = -2; ky <= 2; ky++)
+						{
+							for (long long kx = -2; kx <= 2; kx++)
+							{
+								const std::size_t sx = clampCoordinate(
+									static_cast<long long>(x) + kx * stride,
+									width
+								);
+								const std::size_t sy = clampCoordinate(
+									static_cast<long long>(y) + ky * stride,
+									height
+								);
+								const std::size_t sample = sy * width + sx;
+								if (!volumeMask[sample])
+									continue;
+								const double depthDifference = std::fabs(
+									centerDepth - features[sample][3]
+								);
+								const double sampleDensity = features[sample][7];
+								const double densityDifference = std::fabs(
+									centerDensity - sampleDensity
+								) / (0.08 + centerDensity + sampleDensity);
+								const double opacityDifference = std::fabs(
+									centerOpacity - volumeOpacity[sample]
+								) / (0.04 + centerOpacity + volumeOpacity[sample]);
+								const double sampleGuide = colorLuminance(deterministicColor[sample]);
+								const double guideDifference = std::fabs(centerGuide - sampleGuide)
+									/ (0.05 + centerGuide + sampleGuide);
+								const double edgeWeight = std::exp(
+									-(depthDifference * depthDifference) / (2.0 * 0.018 * 0.018)
+									-(densityDifference * densityDifference) / (2.0 * 0.24 * 0.24)
+									-(opacityDifference * opacityDifference) / (2.0 * 0.20 * 0.20)
+									-(guideDifference * guideDifference) / (2.0 * 0.32 * 0.32)
+								);
+								const double weight = kernel[static_cast<std::size_t>(kx + 2)]
+									* kernel[static_cast<std::size_t>(ky + 2)] * edgeWeight;
+								sum += current[sample] * weight;
+								totalWeight += weight;
+							}
+						}
+						const Color filtered = totalWeight > std::numeric_limits<double>::epsilon()
+							? sum / totalWeight
+							: current[center];
+						const double variance = std::isfinite(colorVariance[center])
+							? std::max(0.0, colorVariance[center])
+							: 0.0;
+						const double relativeNoise = std::sqrt(variance)
+							/ (0.02 + colorLuminance(stochasticColor[center]));
+						const double minimumNoise = iteration == 0 ? 0.01
+							: (iteration == 1 ? 0.035 : 0.07);
+						const double maximumNoise = iteration == 0 ? 0.08
+							: (iteration == 1 ? 0.16 : 0.28);
+						double filterStrength = 1.0;
+						if (sampleCount[center] >= varianceRampStartSPP)
+						{
+							double measuredStrength = std::clamp(
+								(relativeNoise - minimumNoise)
+									/ (maximumNoise - minimumNoise),
+								0.0,
+								1.0
+							);
+							measuredStrength = measuredStrength * measuredStrength
+								* (3.0 - 2.0 * measuredStrength);
+							// A single extra sample must not switch a pixel from the full
+							// low-spp pass to a lightly filtered variance-controlled pass.
+							// Gain confidence in the estimator gradually instead.
+							const double varianceConfidence = smoothStep(
+								static_cast<double>(varianceRampStartSPP),
+								static_cast<double>(varianceRampEndSPP),
+								static_cast<double>(sampleCount[center])
+							);
+							filterStrength += (measuredStrength - filterStrength)
+								* varianceConfidence;
+						}
+						const double centerLuminance = colorLuminance(stochasticColor[center]);
+						const double shadowInterior = smoothStep(0.25, 0.75, centerOpacity)
+							* std::max(
+								1.0 - smoothStep(0.02, 0.12, centerGuide),
+								1.0 - smoothStep(0.015, 0.08, centerLuminance)
+							);
+						const double shadowMinimum = iteration == 0 ? 0.25
+							: (iteration == 1 ? 0.45 : 0.60);
+						filterStrength = std::max(
+							filterStrength,
+							shadowInterior * shadowMinimum
+						);
+						next[center] = current[center] * (1.0 - filterStrength)
+							+ filtered * filterStrength;
+					}
+				}
+			});
+			current.swap(next);
+		}
+		for (std::size_t i = 0; i < current.size(); i++)
+		{
+			if (!volumeMask[i])
+				current[i] = surfaceResult[i];
+		}
+		return (current);
+	}
 }
 
 void	Denoise::NFORBuffers::initialize(std::size_t imageWidth, std::size_t imageHeight)
@@ -958,7 +1148,10 @@ void	Denoise::NFORBuffers::initialize(std::size_t imageWidth, std::size_t imageH
 
 	this->colorA.assign(pixelCount, Color());
 	this->colorB.assign(pixelCount, Color());
+	this->deterministicColor.assign(pixelCount, Color());
+	this->volumeOpacity.assign(pixelCount, 0.0);
 	this->colorVariance.assign(pixelCount, 0.0);
+	this->sampleCount.assign(pixelCount, 0u);
 	this->featuresA.assign(pixelCount, FeatureVector());
 	this->featuresB.assign(pixelCount, FeatureVector());
 	this->featureVariance.assign(pixelCount, FeatureVector());
@@ -1084,7 +1277,27 @@ std::unique_ptr<Image>	Denoise::applyNFOR(const NFORBuffers& buffers, const NFOR
 	reportProgress(settings, 90);
 
 	const std::vector<double> finalVariance = combinedResultVariance(filteredA.second, filteredB.second);
-	const std::vector<Color> finalColor = regressionPass(combined, finalFeatures, finalVariance, buffers.width, buffers.height, settings, 1.0);
+	const std::vector<Color> surfaceColor = regressionPass(
+		combined,
+		finalFeatures,
+		finalVariance,
+		buffers.width,
+		buffers.height,
+		settings,
+		1.0
+	);
+	const std::vector<Color> finalColor = reconstructVolumeResidual(
+		color,
+		surfaceColor,
+		finalFeatures,
+		buffers.deterministicColor,
+		buffers.volumeOpacity,
+		buffers.colorVariance,
+		buffers.sampleCount,
+		buffers.width,
+		buffers.height,
+		settings.threadCount
+	);
 	auto image = std::make_unique<Image>(buffers.width, buffers.height);
 
 	reportProgress(settings, 98);

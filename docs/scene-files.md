@@ -38,9 +38,20 @@ The parser is intentionally strict: unknown lines and malformed values throw an 
 | `samples` | `samples=N` | Rays per pixel. |
 | `adaptive` | `adaptive=0` or `adaptive=1` | Toggles adaptive per-pixel sampling. Enabled by default. When enabled, `samples` is the maximum samples per pixel. Aliases: `adaptivesampling`, `adaptive_sampling`. |
 | `adaptiveminsamples` | `adaptiveminsamples=N` | Minimum samples before adaptive stopping can occur. Alias: `adaptive_min_samples`. |
+| `adaptivebackgroundminsamples` | `adaptivebackgroundminsamples=N` | Background sample minimum; 0 inherits the global minimum, otherwise at least 2. Alias: `adaptive_background_min_samples`. |
+| `adaptivevolumeminsamples` | `adaptivevolumeminsamples=N` | Volume sample minimum; 0 inherits the global minimum. Alias: `adaptive_volume_min_samples`. |
 | `adaptivethreshold` | `adaptivethreshold=F` | Relative 95% confidence interval threshold for luminance convergence. Lower values render longer. Alias: `adaptive_threshold`. |
 | `adaptivecheckinterval` | `adaptivecheckinterval=N` | Sample interval between adaptive convergence checks. Alias: `adaptive_check_interval`. |
 | `maxlightbounces` | `maxlightbounces=N` | Maximum recursive light bounces. |
+| `volume_primary_samples` | `volume_primary_samples=N` | Primary cloud lighting samples, 1–256; default 4, limited by pixel samples. |
+| `volume_primary_max_steps` | `volume_primary_max_steps=N` | Camera integration cap, 48–65536; default 1024. Increase to resolve fine cloud detail. |
+| `volume_reference` | `volume_reference=0` or `1` | Disable volume lighting approximations and caches; default 0. See Cloud Lighting below. |
+| `volume_guiding_samples` | `volume_guiding_samples=N` | Training paths before rendering; default 0 (disabled). |
+| `volume_guiding_resolution` | `volume_guiding_resolution=N` | Guide cells per axis, 1–128; default 16. Maximum allocation: 512 MiB. |
+| `volume_guiding_lobes` | `volume_guiding_lobes=N` | Directions per guide cell, 4–64; default 16. |
+| `volume_guiding_anisotropy` | `volume_guiding_anisotropy=F` | Guide directional concentration, 0–0.95; default 0.8. |
+| `volume_guiding_strength` | `volume_guiding_strength=F` | Learned sampling weight, 0–0.75; default 0.25. |
+| `volume_guiding_start_bounce` | `volume_guiding_start_bounce=N` | First guided bounce, 0–64; default 1. |
 | `view_transform` | `view_transform=standard`, `agx`, `aces`, or `raw` | Selects the display transform. `standard` converts scene-linear ACEScg to clipped display sRGB. `agx` uses an AgX-style highlight rolloff and is the default. `aces` uses the ACES-fitted display transform. `raw` preserves scene-linear ACEScg HDR data for debugging/compositing and is not for display viewing. |
 | `bloom` | `bloom=0` or `bloom=1` | Enables bloom when set to `1`. Bloom ignores isolated extreme firefly pixels so rare path samples do not expand into square glow blocks; display output also suppresses isolated saturated white fireflies. |
 | `exposure` | `exposure=F` | Exposure compensation in stops. `1.0` doubles light before bloom and the view transform; `-1.0` halves it. |
@@ -71,11 +82,17 @@ The parser is intentionally strict: unknown lines and malformed values throw an 
 
 ### Adaptive Sampling Notes
 
-Adaptive sampling is enabled by default and never exceeds `samples`. It renders
-at least `adaptiveminsamples`, then periodically estimates luminance variance
-and stops a pixel early only when the configured confidence threshold is met.
-Dark pixels that are consistently black can finish quickly, while low-light
-pixels with rare bright contributions continue sampling.
+Adaptive sampling stops converged pixels early, up to the `samples` limit.
+Use `adaptiveminsamples` for the minimum budget and `adaptivethreshold` to
+control convergence. Background and volume pixels can use separate minimums;
+`0` inherits the global minimum.
+
+### Learned Volume Path Guiding Notes
+
+Optional guiding traces training paths before rendering, then uses what it
+learned to sample promising light directions. It can reduce volume noise, but
+adds setup time. Leave it off unless comparisons show a benefit for your scene.
+To try it, add `volume_guiding_samples=32768` to `[settings]`.
 
 ### Caustic Photon Mapping Notes
 
@@ -153,24 +170,14 @@ linear RGB radiance and converted to ACEScg. HDR values above `1.0` are preserve
 in scene-linear rendering, so they can drive bright reflections, bloom, and
 diffuse illumination.
 
-Paths are resolved like other assets: relative to the scene file, relative to
-the current working directory, then under common asset directories including
-`textures/` and `assets/textures/`. When `sky=environment`, the map is visible
-to camera rays and specular/refraction misses. When `sky=atmosphere` and an
-environment map is loaded, Luz composites the map behind the atmosphere as
-`atmosphere in-scattering + atmosphere transmittance * environment radiance`.
-This allows calibrated HDR horizons, interiors, or space backgrounds to coexist
-with atmospheric scattering.
+Map paths are resolved relative to the scene file, then the working directory
+and common asset directories. `sky=environment` displays the map;
+`sky=atmosphere` displays it behind the atmosphere.
 
-Environment lighting is independent from visibility. With `environment_lighting=1`
-the map is sampled as an infinite light using luminance-weighted solid-angle
-importance sampling and MIS, even when the visible sky is `atmosphere`. Use
-`environment_lighting=0` when the map should be a camera/reflection backdrop
-only. Use at most one of `environment_scale`, `environment_radiance`,
-`environment_luminance`, `environment_irradiance`, or `environment_illuminance`.
-For real HDRI calibration, horizontal illuminance in lux is usually the most
-useful input because it ties the map to measured incident light at the capture
-location.
+`environment_lighting=1` also uses the map to illuminate the scene; set it to
+`0` for a backdrop only. Choose one brightness control: `environment_scale`,
+`environment_radiance`, `environment_luminance`, `environment_irradiance`, or
+`environment_illuminance`.
 
 ## Scene
 
@@ -302,6 +309,8 @@ visible=0
 | OBJ mesh | `obj=path/to/file.obj` |
 | Transformed OBJ mesh | `obj=path/to/file.obj,(x,y,z),material[` or `obj=path/to/file.obj,(x,y,z),material=NAME` |
 | Volume block | `volume name { ... }` |
+| Procedural cloud | `cloud name { ... }` |
+| Authored sparse volume | `volume_grid name { ... }` |
 
 Compact primitive lines can either use an inline material block with
 `material[` and a closing `]`, or bind a named material from `[materials]` with
@@ -381,6 +390,121 @@ sigma_a=(0.01,0.02,0.04)
 anisotropy=0.4
 }
 ```
+
+### Authored Sparse Volumes
+
+`volume_grid` loads a `.luzvol` density asset for clouds or smoke. Convert VDB
+files once using the optional OpenVDB tool; rendering needs no extra libraries.
+
+For the Disney examples, download and extract the
+[Disney cloud dataset](https://disneyanimation.com/resources/clouds/) (CC BY-SA 3.0),
+then run from the repository root:
+
+```sh
+mkdir -p assets/volumes
+tools/build-vdb-converter.sh /tmp/vdb-to-luzvol
+/tmp/vdb-to-luzvol wdas_cloud_half.vdb assets/volumes/wdas_cloud_half.luzvol density
+./luz examples/scenes/disney-cloud-golden-hero.luz --samples 32 --resolution 960x540
+```
+
+OpenVDB must be installed to build the converter. Keep downloaded and converted
+assets in the ignored `assets/volumes/` directory.
+
+Add a volume to `[scene]` (asset paths are relative to the scene file):
+
+```text
+volume_grid cloud {
+file=../../assets/volumes/wdas_cloud_half.luzvol
+position=(0,5200,-14000)
+size=(10500,7100,12900)
+extinction=0.1575
+quality=production
+}
+```
+
+| Property | Purpose |
+| --- | --- |
+| `file` | Path to a `.luzvol` file. |
+| `position`, `size` | Center and dimensions in scene units. Omit `size` to use asset dimensions. |
+| `rotation` | Euler rotation in degrees, applied X, Y, then Z. |
+| `extinction` | Density multiplier in inverse meters. Higher values make a thicker cloud. |
+| `density_threshold` | Remove density below a fraction of the asset maximum, from 0 to less than 1. |
+| `density_gamma` | Density contrast, 0.05–20. Above 1 tightens cores; below 1 expands wisps. |
+| `quality` | `preview`, `production`, `cinematic`, `final`, or `reference`; higher tiers use finer integration. |
+| `directional_cache` | Cache directional-light optical depth, enabled by default. Set to `0` for direct integration. |
+| `primary_detail` | Override camera integration detail, 0.25–16. Increase if fine structures show bands. |
+| `shadow_samples_per_brick` | Override shadow integration samples, 1–32. |
+
+Sparse storage skips empty space. A bounded directional cache reuses light
+attenuation through the volume to speed up sun shadows. Turning it off keeps
+the same lighting model; it does not enable reference transport.
+
+### Procedural Clouds
+
+Procedural clouds generate density without external assets. Start with a preset
+and adjust its size, coverage, and seed. Add this block to `[scene]`:
+
+```text
+cloud clouds {
+type=cumulus
+position=(0,2000,-6000)
+size=(4000,1800,4000)
+coverage=0.45
+seed=73
+quality=production
+}
+```
+
+Presets: `cumulus` (puffy towers), `stratocumulus` (low cloud banks), `stratus`
+(overcast), `cirrus` (thin streaks), and `cumulonimbus` (tall storm clouds).
+Each provides defaults that you can override.
+
+| Property | Purpose |
+| --- | --- |
+| `position`, `size` | Center and dimensions of the generation region in scene units. |
+| `coverage` | Cloud coverage, 0–1. |
+| `extinction` | Peak density in inverse meters; higher values make thicker clouds. |
+| `seed` | Reproducible generation seed. |
+| `macro_scale` | Overall formation scale, 0.25–3; applies to convective presets. |
+| `feature_scale` | Size of billows and noise in scene units. |
+| `detail`, `fine_detail`, `erosion` | Internal detail, small structures, and edge breakup, each 0–1. |
+| `puffiness`, `towering`, `dominance`, `overhang` | Billows, vertical growth, dominant tower, and crown spread, each 0–1. Effects depend on the preset. |
+| `weather_variation`, `base_variation` | Vary formations and condensation height, each 0–1; default 0. |
+| `shear_direction` | Wind direction `(x,y,z)`; uses X/Z. |
+| `offset` | Shift the noise field without moving the region, useful for animation. |
+| `quality` | `preview`, `production`, or `cinematic`. Changes integration accuracy, not cloud shape. |
+| `directional_cache_resolution` | Optional approximate sun/sky cache. Default 0 disables it; try 4 for faster previews. |
+| `primary_detail` | Camera integration detail, 0.25–16; default 1. |
+| `detail_octaves` | Noise detail layers, 1–8. |
+| `max_steps` | Shadow integration cap, 1–4096. |
+| `tracking_majorants` | Empty-space acceleration, enabled by default; set to 0 for diagnostics. |
+
+Use `sky=atmosphere` and a directional sun for outdoor lighting. See
+[`procedural-cumulus-daylight.luz`](../examples/scenes/procedural-cumulus-daylight.luz)
+for a complete scene. Lower resolution and samples for previews; increase
+`primary_detail` and `volume_primary_max_steps` if camera integration shows bands.
+
+### Cloud Lighting
+
+Both cloud types scatter light, self-shadow, and cast shadows onto geometry.
+The renderer combines integrated direct lighting with sampled multiple scattering.
+Production settings approximate higher scattering orders for faster renders.
+
+These properties work on both `cloud` and `volume_grid` blocks:
+
+| Property | Purpose |
+| --- | --- |
+| `albedo` | Scattering color, with channels in 0–1. |
+| `anisotropy`, `backscatter`, `forward_weight` | Directional scattering controls: two lobes in −0.99–0.99 and their blend in 0–1. |
+| `droplet_size` | Water-droplet scattering model, 5–50 microns; 0 uses the lobe controls. |
+| `multiple_scattering_falloff` | Per-bounce extinction reduction, greater than 0 through 1. Lower values trade accuracy for speed; 1 disables reduction. |
+| `multiple_scattering_compensation` | Reconstructed diffuse fill, 0–2; default 0.72. Active when falloff is below 1. |
+
+For a slower stochastic comparison, set `volume_reference=1` in `[settings]`,
+disable denoising and adaptive sampling, and increase samples and light bounces.
+This bypasses volume caches and lighting reconstruction; the atmosphere model
+and finite bounce limit still apply. See
+[`disney-cloud-reference.luz`](../examples/scenes/disney-cloud-reference.luz).
 
 OBJ paths use the path provided by the scene file. Absolute paths are used
 as-is, and relative paths are resolved from the directory containing the
@@ -616,16 +740,12 @@ material colors and is treated as chromaticity for physical unit properties;
 zero-luminance colors are rejected. `radiant_intensity` is W/sr for isotropic
 sphere/point emitters; `candela` is lm/sr.
 
-`directional_light` creates an infinite light whose `direction` is the direction
-light travels, suitable for sun lights. When `sky=atmosphere`, the first
-`directional_light` is also the atmosphere sun source: its opposite direction is
-used for scattering rays toward the sun, and its emitted light value sets the
-atmosphere source intensity. With `solar=SCALE`, Luz uses 1361 W/m^2 direct
-solar irradiance for both surfaces and atmosphere scattering. Use
-`atmosphere_sun_scale` only when you need an artistic atmosphere-only
-multiplier.
-If no directional light exists, the first `atmosphere=` value is used as the
-vertical sun-angle fallback with the atmosphere fallback source intensity.
+`directional_light` creates sunlight; `direction` points in the direction light
+travels. With `sky=atmosphere`, the first directional light also controls the
+sky's sun. `solar=1` sets irradiance to 1361 W/m²; `atmosphere_sun_scale` adjusts
+only the atmosphere brightness. Without a directional light, the sun angle
+comes from `atmosphere=`.
+
 `point_light` and `sphere_light` create emissive spheres. These lights are still
 sampled through Luz's emissive-hittable lighting path. Sphere and point lights
 also accept `visible=0` to hide the light surface from camera and shadow rays

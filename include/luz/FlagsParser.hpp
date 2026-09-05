@@ -28,6 +28,8 @@ class	FlagsParser
 		void	_parseSamples(Scene& scene);
 		void	_parseAdaptiveSampling(Scene& scene);
 		void	_parseAdaptiveMinSamples(Scene& scene);
+		void	_parseAdaptiveBackgroundMinSamples(Scene& scene);
+		void	_parseAdaptiveVolumeMinSamples(Scene& scene);
 		void	_parseAdaptiveThreshold(Scene& scene);
 		void	_parseAdaptiveCheckInterval(Scene& scene);
 		void	_parseMaxLightBounces(Scene& scene);

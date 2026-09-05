@@ -19,6 +19,8 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - Adaptive sampling
 - Denoiser (NFOR-style)
 - Spheres, planes, rectangles, triangles, cubes, volumes, and OBJ meshes
+- Procedural clouds with cumulus, stratus, cirrus, and storm presets
+- Imported cloud volumes in the sparse `.luzvol` format (optional VDB converter)
 - Scene-linear ACEScg rendering with sRGB input/output transforms
 - Spectral authoring helpers: wavelength, blackbody, solar, and reflectance curves
 - Lambertian, GGX metal, rough dielectric, layered principled with subsurface
@@ -30,6 +32,7 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - .blend to .luz converter
 - Fully customizable render parameters via CLI or scene file
 - Importance sampling with PDFs, MIS, and optional caustic photon mapping
+- Optional volume path guiding
 - BVH acceleration, including packed mesh BVHs with binned SAH construction and near-first traversal
 - Atmospheric simulation w/ scattering
 - Physical camera focal length, sensor size, aperture/f-stop, focus distance,
@@ -74,6 +77,29 @@ Run the test suite:
 ```sh
 make test
 ```
+
+## Clouds
+
+Render procedural clouds with no extra assets:
+
+```sh
+./luz examples/scenes/procedural-cumulus-daylight.luz --samples 32 --resolution 960x540
+```
+
+More presets and a layered cloudscape are in [`examples/scenes/`](examples/scenes/).
+Use `--samples` and `--resolution` to balance render time and quality.
+
+For the Disney golden-hour hero, first follow the
+[volume import instructions](docs/scene-files.md#authored-sparse-volumes)
+to create `assets/volumes/wdas_cloud_half.luzvol`, then render:
+
+```sh
+./luz examples/scenes/disney-cloud-golden-hero.luz --samples 32 --resolution 960x540
+```
+
+Disney scenes need a separately downloaded dataset. Only the optional VDB
+converter requires OpenVDB; Luz itself has no third-party dependencies.
+See the [cloud reference](docs/scene-files.md#procedural-clouds) for customization.
 
 ## Showcase
 
@@ -180,6 +206,10 @@ Options:
   --adaptive [true|false]     Toggle adaptive sampling (default: true)
   --no-adaptive               Disable adaptive sampling
   --adaptive-min-samples N    Minimum samples before adaptive stopping
+  --adaptive-background-min-samples N
+                               Background floor (0 inherits adaptive minimum)
+  --adaptive-volume-min-samples N
+                               Volume floor (0 inherits adaptive minimum)
   --adaptive-threshold F      Relative adaptive noise threshold
   --adaptive-check-interval N Adaptive convergence check interval
 	-mlb, --maxLightBounces N   Override maximum light bounces
@@ -258,14 +288,10 @@ The complete scene-file reference is in
 
 ## Adaptive Sampling
 
-Adaptive sampling is enabled by default. `--samples` is the maximum samples per
-pixel when adaptive stopping is active. Each pixel uses a progressive per-pixel
-sample sequence, renders at least
-`--adaptive-min-samples`, then periodically checks luminance and RGB confidence
-intervals. Very dark pixels use a conservative minimum before they can stop, so
-rare light contributions are less likely to be mistaken for converged black.
-Use `--no-adaptive` or `--adaptive false` to render every pixel for the full
-sample count.
+Adaptive sampling is enabled by default: `--samples` sets the maximum samples
+per pixel, and converged pixels stop early. Lower `--adaptive-threshold` for
+more detail, or use `--no-adaptive` to render every pixel at the full sample count.
+See the [scene-file reference](docs/scene-files.md) for advanced settings.
 
 Lower thresholds keep more detail and cost more time. For final renders, start
 with a high max sample count and tune with values like:

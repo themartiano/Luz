@@ -26,6 +26,7 @@ class	EnvironmentMap
 		Color	sampleDirection(const Vector3& direction, double rotationDegrees = 0.0) const;
 		Sample	sample(double selection, Sampler::Sample2D jitter, double rotationDegrees = 0.0) const;
 		double	pdf(const Vector3& direction, double rotationDegrees = 0.0) const;
+		Color	averageRadiance(void) const;
 		double	averageLuminance(void) const;
 		double	horizontalIrradiance(void) const;
 		std::size_t	getWidth(void) const;
@@ -50,6 +51,7 @@ class	EnvironmentMap
 		std::vector<double>	_weights;
 		std::vector<double>	_solidAngles;
 		std::vector<double>	_cdf;
+		Color	_averageRadiance;
 		double	_totalWeight;
 		double	_horizontalIrradiance;
 };
