@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Hittables/Hittable.hpp"
+#include <cstdint>
 
 class	ConstantVolume : public Hittable
 {
@@ -20,4 +21,5 @@ class	ConstantVolume : public Hittable
 		std::shared_ptr<Material>	_phaseFunction;
 		double	_density;
 		double	_negativeInverseDensity;
+		std::uint32_t _samplingStream = 0;
 };

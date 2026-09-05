@@ -4,6 +4,7 @@
 #include "Hittables/Hittable.hpp"
 #include "SparseVolumeGrid.hpp"
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -149,6 +150,7 @@ class SparseGridVolume : public Hittable, public DensityVolume
 		std::vector<float> _densityRemap;
 		double _densityRemapScale = 0.0;
 		double _densityRemapThreshold = 0.0;
+		std::uint32_t _samplingStream = 0;
 		std::shared_ptr<Material> _phaseFunction;
 		mutable std::mutex _directionalCacheMutex;
 		mutable std::shared_ptr<const DirectionalCacheList> _directionalCacheSnapshot;

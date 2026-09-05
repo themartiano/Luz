@@ -22,7 +22,7 @@ jobs:
           -DLUZ_ENABLE_LTO=OFF
 
       - name: Build
-        run: cmake --build build --config Release --target Luz --parallel
+        run: cmake --build build --config Release --target luz --parallel
 
       - name: Package
         run: |
@@ -30,7 +30,7 @@ jobs:
           arch="$(uname -m)"
           package_dir="release/luz-${GITHUB_REF_NAME}-macos-${arch}"
           mkdir -p "$package_dir"
-          cp build/Luz "$package_dir/"
+          cp build/luz "$package_dir/"
           cp LICENSE README.md "$package_dir/"
           cp -R examples "$package_dir/"
           tar -czf "${package_dir}.tar.gz" -C release "$(basename "$package_dir")"
@@ -68,14 +68,14 @@ jobs:
 
       - name: Build
         shell: msys2 {0}
-        run: cmake --build build --config Release --target Luz --parallel
+        run: cmake --build build --config Release --target luz --parallel
 
       - name: Package
         shell: pwsh
         run: |
           $packageDir = "release\luz-${env:GITHUB_REF_NAME}-windows-x64"
           New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
-          Copy-Item build\Luz.exe $packageDir\
+          Copy-Item build\luz.exe $packageDir\
           Copy-Item LICENSE,README.md $packageDir\
           Copy-Item examples $packageDir\examples -Recurse
           Compress-Archive -Path $packageDir -DestinationPath "$packageDir.zip" -Force
@@ -103,7 +103,7 @@ jobs:
           -DLUZ_ENABLE_LTO=OFF
 
       - name: Build
-        run: cmake --build build --config Release --target Luz --parallel
+        run: cmake --build build --config Release --target luz --parallel
 
       - name: Package
         run: |
@@ -111,7 +111,7 @@ jobs:
           arch="$(uname -m)"
           package_dir="release/luz-${GITHUB_REF_NAME}-linux-${arch}"
           mkdir -p "$package_dir"
-          cp build/Luz "$package_dir/"
+          cp build/luz "$package_dir/"
           cp LICENSE README.md "$package_dir/"
           cp -R examples "$package_dir/"
           tar -czf "${package_dir}.tar.gz" -C release "$(basename "$package_dir")"

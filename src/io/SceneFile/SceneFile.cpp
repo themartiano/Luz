@@ -320,7 +320,12 @@ void	SceneFile::read(Scene& scene, std::string fileName)
 
 	for (const std::shared_future<std::shared_ptr<Hittable>>& pendingMeshLoad : context.pendingMeshLoads)
 	{
-		pendingMeshLoad.get();
+		// Joining every asynchronous load also propagates loader exceptions. Keep
+		// the returned shared pointer alive for the duration of the join and make
+		// the intentional discard explicit for toolchains that mark future::get()
+		// as [[nodiscard]].
+		const std::shared_ptr<Hittable> loadedMesh = pendingMeshLoad.get();
+		(void)loadedMesh;
 	}
 	scene.syncAtmosphereSunDirection();
 	const double sceneFileMS = sceneFileClock.elapsedMS();

@@ -9,6 +9,7 @@
 #include "Hittables/DirectionalLight.hpp"
 #include "Hittables/DensityVolume.hpp"
 #include "VolumeGuidingField.hpp"
+#include <array>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -28,12 +29,15 @@ namespace
 	constexpr double	DIRECT_LIGHT_LATE_SAMPLE_PROBABILITY = 0.5;
 	constexpr double	VOLUME_SUN_GUIDE_PROBABILITY = 0.25;
 	constexpr double	VOLUME_SKY_GUIDE_PROBABILITY = 0.25;
+	constexpr std::size_t	ENVIRONMENT_DIFFUSE_DIRECTION_COUNT = 8;
+	constexpr std::size_t	ENVIRONMENT_DIFFUSE_KNOT_COUNT = 4;
+	constexpr double	MAX_PHASE_ANISOTROPY = 0.9999;
 	const double		FULL_SPHERE_PDF = 1.0 / (4.0 * D_PI);
 	const double		HEMISPHERE_PDF = 1.0 / (2.0 * D_PI);
 
 	double henyeyGreensteinPDF(double anisotropy, double cosTheta)
 	{
-		const double g = std::max(-0.99, std::min(0.99, anisotropy));
+		const double g = std::clamp(anisotropy, -MAX_PHASE_ANISOTROPY, MAX_PHASE_ANISOTROPY);
 		const double g2 = g * g;
 		const double denominator = std::max(1e-12, 1.0 + g2 - (2.0 * g * cosTheta));
 		return ((1.0 - g2) / (4.0 * D_PI * denominator * std::sqrt(denominator)));
@@ -41,7 +45,7 @@ namespace
 
 	double drainePDF(double anisotropy, double alpha, double cosTheta)
 	{
-		const double g = std::max(-0.99, std::min(0.99, anisotropy));
+		const double g = std::clamp(anisotropy, -MAX_PHASE_ANISOTROPY, MAX_PHASE_ANISOTROPY);
 		const double g2 = g * g;
 		const double denominator = std::max(1e-12, 1.0 + g2 - 2.0 * g * cosTheta);
 		const double normalization = 1.0 + alpha * (1.0 + 2.0 * g2) / 3.0;
@@ -210,7 +214,7 @@ namespace
 		const double sampledAnisotropy = Sampler::sample1D(Sampler::DIM_MATERIAL_DECISION) < primaryWeight
 			? scatterRecord.phaseAnisotropy
 			: scatterRecord.phaseSecondaryAnisotropy;
-		const double g = std::max(-0.99, std::min(0.99, sampledAnisotropy));
+		const double g = std::clamp(sampledAnisotropy, -MAX_PHASE_ANISOTROPY, MAX_PHASE_ANISOTROPY);
 		const Sampler::Sample2D sample = Sampler::sample2D(Sampler::DIM_BSDF_DIRECTION);
 		const double phi = 2.0 * D_PI * sample.x;
 		double cosTheta;
@@ -615,6 +619,51 @@ namespace
 		);
 	}
 
+	bool	isVolumePhaseMaterial(const Material* material)
+	{
+		if (!material)
+		{
+			return (false);
+		}
+		const MaterialType type = material->getType();
+
+		return (type == ISOTROPIC || type == HENYEY_GREENSTEIN);
+	}
+
+	double	nearestCameraSurfaceT(Scene& scene, const Ray& cameraRay)
+	{
+		double closestT = T_MAX;
+
+		for (const std::shared_ptr<Hittable>& hittable : scene.getHittables())
+		{
+			if (
+				!hittable
+				|| dynamic_cast<const DensityVolume*>(hittable.get()) != nullptr
+				|| isVolumePhaseMaterial(hittable->getMaterial())
+			)
+			{
+				continue;
+			}
+
+			Ray surfaceRay = cameraRay;
+			HitRecord surfaceHit;
+			if (!hittable->hit(surfaceRay, surfaceHit, T_MIN, closestT))
+			{
+				continue;
+			}
+			if (
+				isVolumePhaseMaterial(surfaceHit.material)
+				|| !std::isfinite(surfaceHit.t0)
+				|| surfaceHit.t0 <= T_MIN
+			)
+			{
+				continue;
+			}
+			closestT = surfaceHit.t0;
+		}
+		return (closestT);
+	}
+
 	bool	leavesOpaqueGeometricSurface(const HitRecord& hitRecord, const Vector3& direction)
 	{
 		if (materialCanTransmitThroughGeometry(hitRecord.material))
@@ -896,27 +945,6 @@ namespace
 		}
 	}
 
-	double	primaryAtmosphereTMax(const Atmosphere& atmosphere, const Ray& ray, double surfaceTMax)
-	{
-		if (!std::isfinite(surfaceTMax) || surfaceTMax <= T_MIN)
-		{
-			return (surfaceTMax);
-		}
-
-		HitRecord earthHitRecord;
-		if (!planetaryHit(atmosphere.metersToSceneUnits(atmosphere.getEarthRadius()), ray, earthHitRecord) || earthHitRecord.t1 <= T_MIN)
-		{
-			return (surfaceTMax);
-		}
-
-		const double groundTMax = std::max(0.0, earthHitRecord.t0);
-		if (!std::isfinite(groundTMax) || groundTMax <= T_MIN)
-		{
-			return (surfaceTMax);
-		}
-		return (std::max(surfaceTMax, groundTMax));
-	}
-
 	void	compositePrimaryAtmosphereSegment(Scene& scene, const Ray& ray, double tMax, Color& accumulatedColor, Color& throughput)
 	{
 		if (scene.getRenderSky() != SKY_ATMOSPHERE)
@@ -924,11 +952,7 @@ namespace
 			return;
 		}
 
-		const Atmosphere& atmosphere = scene.getAtmosphere();
-		const AtmosphereSample atmosphereSample = atmosphere.sampleSegment(
-			ray,
-			primaryAtmosphereTMax(atmosphere, ray, tMax)
-		);
+		const AtmosphereSample atmosphereSample = scene.getAtmosphere().sampleSegment(ray, tMax);
 		accumulatedColor += clampRayColor(throughput * atmosphereSample.inScattering);
 		throughput = clampRayColor(throughput * atmosphereSample.transmittance);
 	}
@@ -1125,6 +1149,168 @@ namespace
 		return (transmittance);
 	}
 
+	Color geometricShadowTransmittance(
+		Scene& scene,
+		const Vector3& origin,
+		const Vector3& direction
+	)
+	{
+		Color transmittance(1.0, 1.0, 1.0);
+		Ray shadowRay = Ray::fromNormalizedDirection(origin, direction);
+
+		// The diffuse environment control handles participating media separately
+		// through one cache-friendly upward optical-depth query. Walking the original
+		// scene list here keeps opaque geometry in the estimate without asking a BVH
+		// that may also contain those media to attenuate them a second time.
+		for (const std::shared_ptr<Hittable>& hittable : scene.getHittables())
+		{
+			if (
+				!hittable
+				|| dynamic_cast<const DensityVolume*>(hittable.get()) != nullptr
+				|| isVolumePhaseMaterial(hittable->getMaterial())
+			)
+			{
+				continue;
+			}
+			transmittance = transmittance * hittable->shadowTransmittance(
+				shadowRay,
+				T_MIN,
+				T_MAX
+			);
+			if (maxChannel(transmittance) <= 1e-8)
+				return (Color(0.0, 0.0, 0.0));
+		}
+		return (transmittance);
+	}
+
+	bool upwardCloudOpticalDepth(
+		const std::vector<const DensityVolume*>& clouds,
+		const Vector3& position,
+		const Vector3& direction,
+		double& opticalDepth
+	)
+	{
+		opticalDepth = 0.0;
+		for (const DensityVolume* cloud : clouds)
+		{
+			double cloudOpticalDepth = 0.0;
+			if (cloud->directionalOpticalDepth(position, direction, cloudOpticalDepth))
+			{
+				if (!std::isfinite(cloudOpticalDepth) || cloudOpticalDepth < 0.0)
+					return (false);
+				opticalDepth += cloudOpticalDepth;
+				continue;
+			}
+
+			// Procedural density fields intentionally do not allocate a directional
+			// cache. Their deterministic shadow integrator is the bounded fallback.
+			const Hittable* hittable = dynamic_cast<const Hittable*>(cloud);
+			if (!hittable)
+				return (false);
+			Ray shadowRay = Ray::fromNormalizedDirection(position, direction);
+			const Color transmittance = hittable->shadowTransmittance(
+				shadowRay,
+				T_MIN,
+				T_MAX
+			);
+			const double scalarTransmittance = std::clamp(
+				Utilities::luminance(transmittance),
+				0.0,
+				1.0
+			);
+			if (!std::isfinite(scalarTransmittance))
+				return (false);
+			cloudOpticalDepth = scalarTransmittance > std::exp(-20.0)
+				? -std::log(scalarTransmittance)
+				: 20.0;
+			opticalDepth += cloudOpticalDepth;
+		}
+		return (std::isfinite(opticalDepth));
+	}
+
+	struct EnvironmentDiffuseKnot
+	{
+		Color visibleRadiance;
+		double upwardOpticalDepth = 0.0;
+		bool valid = false;
+	};
+
+	std::array<EnvironmentDiffuseKnot, ENVIRONMENT_DIFFUSE_KNOT_COUNT>
+	buildEnvironmentDiffuseKnots(
+		Scene& scene,
+		const Ray& cameraRay,
+		double entryT,
+		double exitT,
+		const Vector3& upwardDirection,
+		const std::vector<const DensityVolume*>& clouds
+	)
+	{
+		std::array<EnvironmentDiffuseKnot, ENVIRONMENT_DIFFUSE_KNOT_COUNT> knots{};
+		const double inverseRootThree = 1.0 / std::sqrt(3.0);
+		const std::array<Vector3, ENVIRONMENT_DIFFUSE_DIRECTION_COUNT> directions = {{
+			Vector3(-inverseRootThree, -inverseRootThree, -inverseRootThree),
+			Vector3(-inverseRootThree, -inverseRootThree, inverseRootThree),
+			Vector3(-inverseRootThree, inverseRootThree, -inverseRootThree),
+			Vector3(-inverseRootThree, inverseRootThree, inverseRootThree),
+			Vector3(inverseRootThree, -inverseRootThree, -inverseRootThree),
+			Vector3(inverseRootThree, -inverseRootThree, inverseRootThree),
+			Vector3(inverseRootThree, inverseRootThree, -inverseRootThree),
+			Vector3(inverseRootThree, inverseRootThree, inverseRootThree)
+		}};
+		const std::shared_ptr<EnvironmentMap>& environment = scene.getEnvironmentMap();
+		if (!environment)
+			return (knots);
+
+		for (std::size_t knotIndex = 0; knotIndex < knots.size(); knotIndex++)
+		{
+			const double fraction = (static_cast<double>(knotIndex) + 0.5)
+				/ static_cast<double>(knots.size());
+			const Vector3 position = cameraRay.pointAtRay(
+				entryT + fraction * (exitT - entryT)
+			);
+			Color visibleRadiance(0.0, 0.0, 0.0);
+			for (const Vector3& direction : directions)
+			{
+				visibleRadiance += environment->sampleDirection(
+					direction,
+					scene.getEnvironmentRotation()
+				) * geometricShadowTransmittance(scene, position, direction);
+			}
+			knots[knotIndex].visibleRadiance = visibleRadiance
+				* (scene.getEnvironmentStrength() / static_cast<double>(directions.size()));
+			knots[knotIndex].valid = upwardCloudOpticalDepth(
+				clouds,
+				position,
+				upwardDirection,
+				knots[knotIndex].upwardOpticalDepth
+			);
+		}
+		return (knots);
+	}
+
+	EnvironmentDiffuseKnot interpolateEnvironmentDiffuseKnot(
+		const std::array<EnvironmentDiffuseKnot, ENVIRONMENT_DIFFUSE_KNOT_COUNT>& knots,
+		double fraction
+	)
+	{
+		const double coordinate = std::clamp(
+			fraction * static_cast<double>(knots.size()) - 0.5,
+			0.0,
+			static_cast<double>(knots.size() - 1)
+		);
+		const std::size_t first = static_cast<std::size_t>(std::floor(coordinate));
+		const std::size_t second = std::min(first + 1, knots.size() - 1);
+		const double weight = coordinate - static_cast<double>(first);
+		EnvironmentDiffuseKnot result;
+
+		result.visibleRadiance = knots[first].visibleRadiance * (1.0 - weight)
+			+ knots[second].visibleRadiance * weight;
+		result.upwardOpticalDepth = knots[first].upwardOpticalDepth * (1.0 - weight)
+			+ knots[second].upwardOpticalDepth * weight;
+		result.valid = knots[first].valid && knots[second].valid;
+		return (result);
+	}
+
 	std::vector<const DensityVolume*> primaryDensityVolumes(Scene& scene)
 	{
 		std::vector<const DensityVolume*> volumes;
@@ -1172,6 +1358,8 @@ namespace
 		}
 		const bool hasDiffuseAtmosphere = hasReconstructedMultipleScattering
 			&& hasProceduralAtmosphereLight(scene);
+		const bool hasDiffuseEnvironment = hasReconstructedMultipleScattering
+			&& hasEnvironmentLight(scene);
 		double entryT = T_MAX;
 		double exitT = -T_MAX;
 		double minimumFeatureScale = T_MAX;
@@ -1188,6 +1376,7 @@ namespace
 				cloud->volumeFeatureScale()
 			);
 		}
+		exitT = std::min(exitT, nearestCameraSurfaceT(scene, cameraRay));
 		if (!(entryT < exitT) || !std::isfinite(entryT) || !std::isfinite(exitT))
 			return (PrimaryCloudControl());
 		const double rayLength = std::sqrt(Utilities::vectorLengthSquared(cameraRay.getDirection()));
@@ -1203,12 +1392,33 @@ namespace
 		);
 		const double stepT = interval / static_cast<double>(stepCount);
 		const double stepDistance = stepT * rayLength;
-		const Vector3 skyDirection = Utilities::vectorLengthSquared(cameraRay.getOrigin()) > 1e-12
+		const Vector3 skyDirection = hasDiffuseAtmosphere
+			&& Utilities::vectorLengthSquared(cameraRay.getOrigin()) > 1e-12
 			? Utilities::normalize(cameraRay.getOrigin())
 			: Vector3(0.0, 1.0, 0.0);
-		const Color diffuseSkyRadiance = hasDiffuseAtmosphere
-			? scene.getAtmosphere().sampleDiffuseSkyRadiance(cameraRay.getOrigin())
-			: Color(0.0, 0.0, 0.0);
+		Color diffuseSkyRadiance(0.0, 0.0, 0.0);
+		double diffuseSkyPhaseIntegral = 0.0;
+		std::array<EnvironmentDiffuseKnot, ENVIRONMENT_DIFFUSE_KNOT_COUNT>
+			environmentDiffuseKnots{};
+		if (hasDiffuseEnvironment)
+		{
+			environmentDiffuseKnots = buildEnvironmentDiffuseKnots(
+				scene,
+				cameraRay,
+				entryT,
+				exitT,
+				skyDirection,
+				clouds
+			);
+		}
+		else if (hasDiffuseAtmosphere)
+		{
+			diffuseSkyRadiance = scene.getAtmosphere().sampleDiffuseSkyRadiance(
+				cameraRay.getOrigin()
+			);
+			// sampleDiffuseSkyRadiance() is an upper-hemisphere mean.
+			diffuseSkyPhaseIntegral = 0.5;
+		}
 		Color result(0.0, 0.0, 0.0);
 		double cameraCloudTransmittance = 1.0;
 
@@ -1347,80 +1557,106 @@ namespace
 					}
 				}
 			}
-			if (hasDiffuseAtmosphere && maxChannel(diffuseSkyRadiance) > 0.0)
+			if (
+				hasDiffuseEnvironment
+				|| (diffuseSkyPhaseIntegral > 0.0 && maxChannel(diffuseSkyRadiance) > 0.0)
+			)
 			{
-				Color bulkScatteringCoefficient(0.0, 0.0, 0.0);
-				double bulkExtinctionSum = 0.0;
-				double falloffExtinctionSum = 0.0;
-				double compensationExtinctionSum = 0.0;
-				double skyOpticalDepth = 0.0;
-				bool hasSkyOpticalDepth = false;
-				bool missingSkyOpticalDepth = false;
-				for (const DensityVolume* cloud : clouds)
+				Color diffuseIncidentRadiance = diffuseSkyRadiance;
+				double diffusePhaseIntegral = diffuseSkyPhaseIntegral;
+				double environmentUpwardOpticalDepth = 0.0;
+				bool environmentKnotValid = true;
+				if (hasDiffuseEnvironment)
 				{
-					const double cloudExtinction = cloud->extinctionAt(position);
-					bulkScatteringCoefficient += cloud->volumeAlbedo() * cloudExtinction;
-					bulkExtinctionSum += cloudExtinction;
-					falloffExtinctionSum += cloudExtinction
-						* cloud->multipleScatteringFalloff();
-					compensationExtinctionSum += cloudExtinction
-						* cloud->multipleScatteringCompensation();
-					if (cloudExtinction > 0.0)
-					{
-						double cloudOpticalDepth = 0.0;
-						if (cloud->directionalOpticalDepth(
-							position,
-							skyDirection,
-							cloudOpticalDepth
-						))
-						{
-							skyOpticalDepth += cloudOpticalDepth;
-							hasSkyOpticalDepth = true;
-						}
-						else
-							missingSkyOpticalDepth = true;
-					}
+					const EnvironmentDiffuseKnot environmentKnot =
+						interpolateEnvironmentDiffuseKnot(
+							environmentDiffuseKnots,
+							(static_cast<double>(step) + 0.5)
+								/ static_cast<double>(stepCount)
+						);
+					diffuseIncidentRadiance = environmentKnot.visibleRadiance;
+					diffusePhaseIntegral = 1.0;
+					environmentUpwardOpticalDepth = environmentKnot.upwardOpticalDepth;
+					environmentKnotValid = environmentKnot.valid;
 				}
-				if (bulkExtinctionSum > 0.0 && maxChannel(bulkScatteringCoefficient) > 0.0)
+				if (!environmentKnotValid)
+					diffusePhaseIntegral = 0.0;
+				if (diffusePhaseIntegral > 0.0 && maxChannel(diffuseIncidentRadiance) > 0.0)
 				{
-					const double averageFalloff = std::clamp(
-						falloffExtinctionSum / bulkExtinctionSum,
-						0.0,
-						1.0
-					);
-					const double compensation = std::clamp(
-						compensationExtinctionSum / bulkExtinctionSum,
-						0.0,
-						2.0
-					);
-					if (averageFalloff < 0.999 && compensation > 0.0)
+					Color bulkScatteringCoefficient(0.0, 0.0, 0.0);
+					double bulkExtinctionSum = 0.0;
+					double falloffExtinctionSum = 0.0;
+					double compensationExtinctionSum = 0.0;
+					double skyOpticalDepth = environmentUpwardOpticalDepth;
+					bool hasSkyOpticalDepth = hasDiffuseEnvironment;
+					bool missingSkyOpticalDepth = false;
+					for (const DensityVolume* cloud : clouds)
 					{
-						const double averageAlbedo = std::clamp(
-							Utilities::luminance(bulkScatteringCoefficient)
-							/ bulkExtinctionSum,
+						const double cloudExtinction = cloud->extinctionAt(position);
+						bulkScatteringCoefficient += cloud->volumeAlbedo() * cloudExtinction;
+						bulkExtinctionSum += cloudExtinction;
+						falloffExtinctionSum += cloudExtinction
+							* cloud->multipleScatteringFalloff();
+						compensationExtinctionSum += cloudExtinction
+							* cloud->multipleScatteringCompensation();
+						if (!hasDiffuseEnvironment && cloudExtinction > 0.0)
+						{
+							double cloudOpticalDepth = 0.0;
+							if (cloud->directionalOpticalDepth(
+								position,
+								skyDirection,
+								cloudOpticalDepth
+							))
+							{
+								skyOpticalDepth += cloudOpticalDepth;
+								hasSkyOpticalDepth = true;
+							}
+							else
+								missingSkyOpticalDepth = true;
+						}
+					}
+					if (bulkExtinctionSum > 0.0 && maxChannel(bulkScatteringCoefficient) > 0.0)
+					{
+						const double averageFalloff = std::clamp(
+							falloffExtinctionSum / bulkExtinctionSum,
 							0.0,
 							1.0
 						);
-						const double ratio = std::min(0.94, averageAlbedo * averageFalloff);
-						const double orderGain = ratio > 1e-6
-							? ratio * (1.0 - std::pow(ratio, 4.0)) / (1.0 - ratio)
-							: 0.0;
-						double skyVisibility = 0.12;
-						if (hasSkyOpticalDepth && !missingSkyOpticalDepth)
+						const double compensation = std::clamp(
+							compensationExtinctionSum / bulkExtinctionSum,
+							0.0,
+							2.0
+						);
+						if (averageFalloff < 0.999 && compensation > 0.0)
 						{
-							const double diffusionRate = std::clamp(
-								std::sqrt(std::max(0.0, 3.0 * (1.0 - averageAlbedo))),
-								0.05,
-								0.15
+							const double averageAlbedo = std::clamp(
+								Utilities::luminance(bulkScatteringCoefficient)
+								/ bulkExtinctionSum,
+								0.0,
+								1.0
 							);
-							skyVisibility = 0.09 + 0.91 * std::exp(
-								-diffusionRate * skyOpticalDepth
-							);
+							const double ratio = std::min(0.94, averageAlbedo * averageFalloff);
+							const double orderGain = ratio > 1e-6
+								? ratio * (1.0 - std::pow(ratio, 4.0)) / (1.0 - ratio)
+								: 0.0;
+							double skyVisibility = hasDiffuseEnvironment ? 0.0 : 0.12;
+							if (hasSkyOpticalDepth && !missingSkyOpticalDepth)
+							{
+								const double diffusionRate = std::clamp(
+									std::sqrt(std::max(0.0, 3.0 * (1.0 - averageAlbedo))),
+									0.05,
+									0.15
+								);
+								const double diffusionVisibility = std::exp(
+									-diffusionRate * skyOpticalDepth
+								);
+								skyVisibility = hasDiffuseEnvironment
+									? diffusionVisibility
+									: 0.09 + 0.91 * diffusionVisibility;
+							}
+							source += bulkScatteringCoefficient * diffuseIncidentRadiance
+								* (diffusePhaseIntegral * orderGain * skyVisibility * compensation);
 						}
-						// For a uniform-hemisphere mean radiance, the isotropic phase
-						// integral is (1 / 4pi) * (2pi * mean) = 0.5 * mean.
-						source += bulkScatteringCoefficient * diffuseSkyRadiance
-							* (0.5 * orderGain * skyVisibility * compensation);
 					}
 				}
 			}

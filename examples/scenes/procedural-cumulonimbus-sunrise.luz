@@ -1,0 +1,81 @@
+# Towering procedural cumulonimbus at sunrise. The low solar source is driven
+# through Luz's physical atmosphere, producing warm transmitted key light and
+# cool sky fill without an art-directed fill light.
+[settings]
+resolution=960,540
+samples=384
+adaptive=1
+adaptiveminsamples=32
+adaptivebackgroundminsamples=12
+adaptivevolumeminsamples=64
+adaptivethreshold=0.012
+adaptivecheckinterval=8
+maxlightbounces=12
+view_transform=aces
+exposure=-6.2
+contrast=1
+bloom=0
+denoise=1
+sky=atmosphere
+atmosphere=0.18,6360000,6420000,7994,1200,24,12,0
+atmosphere_sun_scale=0.65
+meters_per_unit=1
+distanceblueness=0
+outputfilename=procedural-cumulonimbus-sunrise.png
+
+[materials]
+material earth_ground {
+type=principled
+base_color=srgb(0.07,0.055,0.045)
+roughness=0.96
+}
+
+[scene]
+camera sunrise_view {
+position=(0,6360250,2000)
+direction=(0.03,0.295,-1)
+up=(0,1,0)
+focal_length_mm=32
+sensor_width_mm=36
+sensor_height_mm=20.25
+pinhole=1
+focus_distance=28200
+}
+# Direction is the direction light travels. The source is five degrees above
+# the horizon and far camera-left, cross-lighting the warm tower and anvil.
+directional_light sunrise_sun {
+direction=(0.970,-0.087,-0.225)
+solar=1
+}
+objects{
+sphere earth {
+position=(0,0,0)
+radius=6360000
+material=earth_ground
+}
+cloud sunrise_storm {
+type=cumulonimbus
+position=(2200,6368250,-25000)
+size=(14500,14500,10500)
+coverage=0.34
+extinction=0.015
+albedo=(0.997,0.999,1.0)
+macro_scale=1.35
+feature_scale=1350
+detail=0.68
+erosion=0.42
+puffiness=0.94
+towering=1.0
+dominance=0.96
+overhang=0.98
+fine_detail=0.90
+multiple_scattering_falloff=0.8
+multiple_scattering_compensation=0.72
+shear_direction=(1,0,-0.10)
+detail_octaves=4
+droplet_size=20
+seed=73
+quality=cinematic
+max_steps=512
+}
+}

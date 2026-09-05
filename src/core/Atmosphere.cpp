@@ -24,17 +24,22 @@ namespace
 		return (Vector3(std::exp(-tau.getX()), std::exp(-tau.getY()), std::exp(-tau.getZ())));
 	}
 
-	Color	atmosphereTransmittanceToACEScg(const Vector3& linearSRGB)
+	Color	atmosphereTransmittanceInACEScg(const Vector3& linearSRGBOpticalDepth)
 	{
-		const Color converted = ColorManagement::acescgFromLinearSRGB(Color(
-			linearSRGB.getX(),
-			linearSRGB.getY(),
-			linearSRGB.getZ()
+		// Transmittance is a multiplicative operator, not radiance: applying the
+		// RGB color transform to exp(-tau) incorrectly mixes its channels. Within
+		// the renderer's diagonal RGB transport approximation, first express the
+		// additive optical depth in the ACEScg working basis, then exponentiate each
+		// working channel to obtain the component-wise attenuation operator.
+		const Color workingOpticalDepth = ColorManagement::acescgFromLinearSRGB(Color(
+			linearSRGBOpticalDepth.getX(),
+			linearSRGBOpticalDepth.getY(),
+			linearSRGBOpticalDepth.getZ()
 		));
 		return (Color(
-			std::clamp(converted.getRed(), 0.0, 1.0),
-			std::clamp(converted.getGreen(), 0.0, 1.0),
-			std::clamp(converted.getBlue(), 0.0, 1.0)
+			std::exp(-std::max(0.0, workingOpticalDepth.getRed())),
+			std::exp(-std::max(0.0, workingOpticalDepth.getGreen())),
+			std::exp(-std::max(0.0, workingOpticalDepth.getBlue()))
 		));
 	}
 
@@ -473,12 +478,22 @@ AtmosphereSample	Atmosphere::sampleSegment(const Ray& ray, double t_max) const
 
 		const double sampleOpticalDepthR = densityR * segmentLength;
 		const double sampleOpticalDepthM = densityM * segmentLength;
+		const double midpointOpticalDepthR = opticalDepthR + 0.5 * sampleOpticalDepthR;
+		const double midpointOpticalDepthM = opticalDepthM + 0.5 * sampleOpticalDepthM;
 		opticalDepthR += sampleOpticalDepthR;
 		opticalDepthM += sampleOpticalDepthM;
 
 		Ray ray2(samplePosition, this->_sunDirection);
 		HitRecord hitRecord2;
 		if (!planetaryHit(this->_atmosphereRadius, ray2, hitRecord2) || hitRecord2.t1 <= 0.0)
+		{
+			continue;
+		}
+		HitRecord earthLightHitRecord;
+		if (
+			planetaryHit(this->_earthRadius, ray2, earthLightHitRecord)
+			&& earthLightHitRecord.t1 > 1e-6
+		)
 		{
 			continue;
 		}
@@ -491,34 +506,23 @@ AtmosphereSample	Atmosphere::sampleSegment(const Ray& ray, double t_max) const
 
 		double  opticalDepthLightR = 0.0;
 		double  opticalDepthLightM = 0.0;
-		bool	reachesSun = true;
-
 		for (int j = 0; j < this->_lightSamples; j++)
 		{
 			const double lightSampleT = (static_cast<double>(j) + 0.5) * segmentLengthLight;
 			const Vector3 samplePositionLight = samplePosition + lightSampleT * this->_sunDirection;
 			const double heightLight = Utilities::vectorLength(samplePositionLight) - this->_earthRadius;
-			if (heightLight < 0.0)
-			{
-				reachesSun = false;
-				break;
-			}
 			opticalDepthLightR += densityAtHeight(heightLight, inverseHR) * segmentLengthLight;
 			opticalDepthLightM += densityAtHeight(heightLight, inverseHM) * segmentLengthLight;
 		}
 
-		if (reachesSun)
-		{
-			const Vector3 tau = betaR * (opticalDepthR + opticalDepthLightR)
-				+ betaM * kMieAbsorptionScale * (opticalDepthM + opticalDepthLightM);
-			const Vector3 attenuation = exponentialAttenuation(tau);
-			sumR += attenuation * sampleOpticalDepthR;
-			sumM += attenuation * sampleOpticalDepthM;
-		}
+		const Vector3 tau = betaR * (midpointOpticalDepthR + opticalDepthLightR)
+			+ betaM * kMieAbsorptionScale * (midpointOpticalDepthM + opticalDepthLightM);
+		const Vector3 attenuation = exponentialAttenuation(tau);
+		sumR += attenuation * sampleOpticalDepthR;
+		sumM += attenuation * sampleOpticalDepthM;
 	}
 
 	const Vector3 viewTau = betaR * opticalDepthR + betaM * kMieAbsorptionScale * opticalDepthM;
-	const Vector3 viewTransmittance = exponentialAttenuation(viewTau);
 	// The compact betaR/betaM triplets are sampled linear-sRGB coefficients.
 	// Keep their channel arithmetic in that basis, then cross the color-space
 	// boundary once into Luz's scene-linear ACEScg working space.
@@ -532,7 +536,7 @@ AtmosphereSample	Atmosphere::sampleSegment(const Ray& ray, double t_max) const
 		result.getY(),
 		result.getZ()
 	));
-	sample.transmittance = atmosphereTransmittanceToACEScg(viewTransmittance);
+	sample.transmittance = atmosphereTransmittanceInACEScg(viewTau);
 	return (sample);
 }
 
@@ -575,7 +579,7 @@ Color	Atmosphere::sampleTransmittance(const Ray& ray, double t_max) const
 		opticalDepthM += densityAtHeight(height, inverseHM) * segmentLength;
 	}
 	const Vector3 tau = betaR * opticalDepthR + betaM * kMieAbsorptionScale * opticalDepthM;
-	return (atmosphereTransmittanceToACEScg(exponentialAttenuation(tau)));
+	return (atmosphereTransmittanceInACEScg(tau));
 }
 
 Color	Atmosphere::sampleDiffuseSkyRadiance(const Vector3& position) const

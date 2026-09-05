@@ -33,6 +33,5 @@ objs
 
 # Local exploratory scenes that are not maintained examples.
 /examples/scenes/disney-cloud.luz
-/examples/scenes/disney-cloud-dense-core.luz
 /examples/scenes/golden-star-bloom.luz
 /examples/scenes/suzanne-instances.luz

@@ -1013,6 +1013,8 @@ namespace
 		// The separately integrated direct-light layer is the radiance guide and
 		// is added only after this pass, preserving sharp silver linings and lobes.
 		constexpr std::array<double, 5> kernel = {1.0, 4.0, 6.0, 4.0, 1.0};
+		constexpr unsigned int varianceRampStartSPP = 32;
+		constexpr unsigned int varianceRampEndSPP = 96;
 		std::vector<Color> current = stochasticColor;
 		std::vector<Color> next = current;
 		for (int iteration = 0; iteration < 3; iteration++)
@@ -1089,16 +1091,26 @@ namespace
 						const double maximumNoise = iteration == 0 ? 0.08
 							: (iteration == 1 ? 0.16 : 0.28);
 						double filterStrength = 1.0;
-						if (sampleCount[center] >= 64u)
+						if (sampleCount[center] >= varianceRampStartSPP)
 						{
-							filterStrength = std::clamp(
+							double measuredStrength = std::clamp(
 								(relativeNoise - minimumNoise)
 									/ (maximumNoise - minimumNoise),
 								0.0,
 								1.0
 							);
-							filterStrength = filterStrength * filterStrength
-								* (3.0 - 2.0 * filterStrength);
+							measuredStrength = measuredStrength * measuredStrength
+								* (3.0 - 2.0 * measuredStrength);
+							// A single extra sample must not switch a pixel from the full
+							// low-spp pass to a lightly filtered variance-controlled pass.
+							// Gain confidence in the estimator gradually instead.
+							const double varianceConfidence = smoothStep(
+								static_cast<double>(varianceRampStartSPP),
+								static_cast<double>(varianceRampEndSPP),
+								static_cast<double>(sampleCount[center])
+							);
+							filterStrength += (measuredStrength - filterStrength)
+								* varianceConfidence;
 						}
 						const double centerLuminance = colorLuminance(stochasticColor[center]);
 						const double shadowInterior = smoothStep(0.25, 0.75, centerOpacity)

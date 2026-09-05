@@ -1,0 +1,83 @@
+# High-altitude procedural cirrus under an independent blue-hour environment.
+# This intentionally avoids both the Disney density field and its sampled sky,
+# exercising environment illumination on the continuous weather/fBM cloud path.
+[settings]
+resolution=960,540
+samples=256
+adaptive=1
+adaptiveminsamples=32
+adaptivebackgroundminsamples=12
+adaptivevolumeminsamples=64
+adaptivethreshold=0.012
+adaptivecheckinterval=8
+maxlightbounces=12
+view_transform=standard
+exposure=0
+contrast=1
+bloom=0
+denoise=1
+sky=environment
+environment=../../assets/environments/twilight-sky.ppm
+environment_scale=1
+environment_lighting=1
+meters_per_unit=1
+distanceblueness=0
+outputfilename=procedural-cirrus-twilight.png
+
+[materials]
+material twilight_ground {
+type=principled
+base_color=linear_srgb(0.015,0.022,0.035)
+roughness=0.94
+}
+
+[scene]
+camera main {
+position=(0,6360200,0)
+direction=(0,0.23,-1)
+up=(0,1,0)
+focal_length_mm=30
+sensor_width_mm=36
+sensor_height_mm=20.25
+pinhole=1
+focus_distance=28000
+}
+directional_light afterglow {
+direction=(0.86,-0.12,-0.50)
+color=linear_srgb(1.5,0.78,0.48)
+irradiance=1.35
+}
+objects{
+sphere earth {
+position=(0,0,0)
+radius=6360000
+material=twilight_ground
+}
+cloud ice_wisps {
+type=cirrus
+position=(0,6371000,-28000)
+size=(52000,1100,32000)
+coverage=0.28
+extinction=0.0009
+albedo=(0.992,0.996,1.0)
+feature_scale=3000
+detail=0.84
+erosion=0.66
+puffiness=0.12
+towering=0.04
+dominance=0.06
+overhang=0.94
+fine_detail=0.92
+multiple_scattering_falloff=0.82
+multiple_scattering_compensation=0.50
+shear_direction=(1,0,0.16)
+anisotropy=0.88
+backscatter=-0.12
+forward_weight=0.96
+droplet_size=0
+detail_octaves=4
+seed=905
+quality=production
+max_steps=512
+}
+}

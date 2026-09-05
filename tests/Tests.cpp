@@ -105,6 +105,134 @@ namespace
 		require(std::isfinite(color.getBlue()) && color.getBlue() >= 0.0, message + " Blue component is invalid.");
 	}
 
+	class	TestPrimaryDensityVolume final : public Hittable, public DensityVolume
+	{
+		public:
+			TestPrimaryDensityVolume(
+				double entryT,
+				double exitT,
+				double extinction,
+				double multipleScatteringFalloff = 1.0,
+				double multipleScatteringCompensation = 0.0,
+				double directionalDepth = -1.0
+			)
+				: _entryT(entryT), _exitT(exitT), _extinction(extinction),
+				  _multipleScatteringFalloff(multipleScatteringFalloff),
+				  _multipleScatteringCompensation(multipleScatteringCompensation),
+				  _directionalDepth(directionalDepth),
+				  _material(std::make_shared<Lambertian>(Color(1.0, 1.0, 1.0)))
+			{}
+
+			bool	hit(Ray& ray, HitRecord& hitRecord, double tMin, double tMax) const override
+			{
+				const double hitT = std::max(tMin, this->_entryT);
+
+				if (hitT >= this->_exitT || hitT > tMax)
+					return (false);
+				hitRecord.t0 = hitT;
+				hitRecord.t1 = this->_exitT;
+				hitRecord.position = ray.pointAtRay(hitT);
+				hitRecord.normal = Vector3(0.0, 0.0, 1.0);
+				hitRecord.geometricNormal = hitRecord.normal;
+				hitRecord.material = this->_material.get();
+				return (true);
+			}
+
+			Color	shadowTransmittance(Ray& ray, double tMin, double tMax) const override
+			{
+				(void)ray;
+				(void)tMin;
+				(void)tMax;
+				return (Color(1.0, 1.0, 1.0));
+			}
+
+			bool	createBoundingBox(AABB& boundingBox) const override
+			{
+				boundingBox = AABB(Vector3(-1.0, -1.0, -6.0), Vector3(1.0, 1.0, -2.0));
+				return (true);
+			}
+
+			Material*	getMaterial(void) const override
+			{
+				return (this->_material.get());
+			}
+
+			bool	integrationInterval(
+				const Ray& ray,
+				double tMin,
+				double tMax,
+				double& entryT,
+				double& exitT
+			) const override
+			{
+				(void)ray;
+				entryT = std::max(tMin, this->_entryT);
+				exitT = std::min(tMax, this->_exitT);
+				return (entryT < exitT);
+			}
+
+			double	extinctionAt(const Vector3& position) const override
+			{
+				(void)position;
+				return (this->_extinction);
+			}
+
+			Color	singleScatteringCoefficientAt(
+				const Vector3& position,
+				const Vector3& incidentDirection,
+				const Vector3& scatteredDirection
+			) const override
+			{
+				(void)position;
+				(void)incidentDirection;
+				(void)scatteredDirection;
+				return (Color(1.0, 1.0, 1.0) * (this->_extinction / (4.0 * D_PI)));
+			}
+
+			Color	volumeAlbedo(void) const override
+			{
+				return (Color(1.0, 1.0, 1.0));
+			}
+
+			double	volumeFeatureScale(void) const override
+			{
+				return (100.0);
+			}
+
+			double	multipleScatteringFalloff(void) const override
+			{
+				return (this->_multipleScatteringFalloff);
+			}
+
+			double	multipleScatteringCompensation(void) const override
+			{
+				return (this->_multipleScatteringCompensation);
+			}
+
+			bool	directionalOpticalDepth(
+				const Vector3& position,
+				const Vector3& direction,
+				double& opticalDepth
+			) const override
+			{
+				(void)position;
+				(void)direction;
+				if (this->_directionalDepth < 0.0)
+					return (false);
+				opticalDepth = this->_directionalDepth;
+				return (true);
+			}
+
+		private:
+			double	_entryT;
+			double	_exitT;
+			double	_extinction;
+			double	_multipleScatteringFalloff;
+			double	_multipleScatteringCompensation;
+			double	_directionalDepth;
+			std::shared_ptr<Material>	_material;
+	};
+
 	void	requireColorNear(const Color& actual, const Color& expected, const std::string& message)
 	{
 		requireNear(actual.getRed(), expected.getRed(), message + " red channel is wrong.");
@@ -1662,12 +1790,93 @@ namespace
 	{
 		std::vector<Color> pixels(4, Color(2.0, 2.0, 2.0));
 		const EnvironmentMap environmentMap(2, 2, pixels);
+		const EnvironmentMap angularMap(1, 3, {
+			Color(4.0, 0.0, 0.0),
+			Color(0.0, 4.0, 0.0),
+			Color(0.0, 0.0, 4.0)
+		});
 
+		requireColorNear(environmentMap.averageRadiance(), Color(2.0, 2.0, 2.0), "Uniform environment average radiance is wrong.");
+		requireColorNear(angularMap.averageRadiance(), Color(1.0, 2.0, 1.0), "Environment RGB solid-angle average is wrong.");
 		requireNear(environmentMap.averageLuminance(), 2.0, "Environment average luminance metric is wrong.");
 		requireNear(
 			environmentMap.horizontalIrradiance(),
 			2.0 * std::sqrt(2.0) * D_PI,
 			"Environment horizontal irradiance metric is wrong."
+		);
+	}
+
+	void	testEnvironmentMapImportanceSampleUsesSolidAngleTexelJitter(void)
+	{
+		std::vector<Color> pixels(8, Color(0.0, 0.0, 0.0));
+		pixels[3] = Color(1.0, 1.0, 1.0);
+		const EnvironmentMap environmentMap(4, 2, pixels);
+		const EnvironmentMap::Sample sample = environmentMap.sample(
+			0.5,
+			Sampler::Sample2D{0.25f, 0.25f},
+			90.0
+		);
+		const double expectedCosTheta = 0.75;
+		const double expectedRadius = std::sqrt(1.0 - expectedCosTheta * expectedCosTheta);
+		const double expectedPhi = D_PI / 8.0;
+		const double expectedPDF = 2.0 / D_PI;
+
+		require(sample.valid, "Environment solid-angle texel sample was invalid.");
+		requireVectorNear(
+			sample.direction,
+			Vector3(
+				expectedRadius * std::cos(expectedPhi),
+				expectedCosTheta,
+				expectedRadius * std::sin(expectedPhi)
+			),
+			"Environment texel jitter did not preserve uniform phi and cos(theta)."
+		);
+		requireNear(sample.pdf, expectedPDF, "Environment texel solid-angle PDF is wrong.");
+		requireNear(
+			sample.pdf,
+			environmentMap.pdf(sample.direction, 90.0),
+			"Environment texel sample and evaluated PDFs disagree."
+		);
+	}
+
+	void	testEnvironmentMapImportanceSampleCosineMoment(void)
+	{
+		std::vector<Color> pixels(2, Color(0.0, 0.0, 0.0));
+		pixels[0] = Color(1.0, 1.0, 1.0);
+		const EnvironmentMap environmentMap(1, 2, pixels);
+		constexpr std::size_t sampleCount = 4096;
+		double meanCosTheta = 0.0;
+		double meanSquaredCosTheta = 0.0;
+
+		for (std::size_t i = 0; i < sampleCount; i++)
+		{
+			const float latitudeJitter = (
+				static_cast<float>(i) + 0.5f
+			) / static_cast<float>(sampleCount);
+			const EnvironmentMap::Sample sample = environmentMap.sample(
+				0.5,
+				Sampler::Sample2D{0.5f, latitudeJitter}
+			);
+			const double cosTheta = sample.direction.getY();
+
+			require(sample.valid, "Stratified environment solid-angle sample was invalid.");
+			meanCosTheta += cosTheta;
+			meanSquaredCosTheta += cosTheta * cosTheta;
+		}
+		meanCosTheta /= static_cast<double>(sampleCount);
+		meanSquaredCosTheta /= static_cast<double>(sampleCount);
+
+		requireNearTolerance(
+			meanCosTheta,
+			0.5,
+			1e-6,
+			"Environment latitude jitter was not uniform in cos(theta)."
+		);
+		requireNearTolerance(
+			meanSquaredCosTheta,
+			1.0 / 3.0,
+			1e-6,
+			"Environment latitude jitter has the wrong solid-angle second moment."
 		);
 	}
 
@@ -1881,6 +2090,8 @@ namespace
 		Renderer::internal::RenderCamera wideCamera = Renderer::internal::_prepareRenderCamera(wideScene);
 		requireNear(Utilities::vectorLength(wideCamera.horizontal), 0.72, "Wide render changed horizontal camera gate.");
 		requireNear(Utilities::vectorLength(wideCamera.vertical), 0.405, "Wide render did not crop vertical camera gate to image aspect.");
+		requireNear(wideCamera.inverseWidth, 1.0 / 768.0, "Camera jitter normalization overscans the final pixel column.");
+		requireNear(wideCamera.inverseHeight, 1.0 / 432.0, "Camera jitter normalization overscans the final pixel row.");
 
 		Scene tallScene;
 		tallScene.getImage()->setWidth(600);
@@ -3589,8 +3800,13 @@ namespace
 			{
 				stableFeatureT = featureHit.t0;
 				require(
-					featureHit.u > parameters.albedo.getRed() && featureHit.u <= 1.0,
-					"Cloud feature hit stored albedo instead of deterministic density."
+					featureHit.u > 0.0 && featureHit.u <= 1.0,
+					"Cloud feature hit stored an invalid deterministic density."
+				);
+				requireNear(
+					featureHit.u,
+					cloud.densityAt(featureHit.position),
+					"Cloud feature hit stored albedo instead of its local density."
 				);
 			}
 			else
@@ -3598,6 +3814,372 @@ namespace
 			Sampler::setFeatureSampling(false);
 			Sampler::endPixelSample();
 		}
+	}
+
+	void	testShiftedProceduralCloudDeltaTrackingUsesFieldSpace(void)
+	{
+		CloudParameters parameters = CloudVolume::preset(CloudType::Cumulus);
+		parameters.position = Vector3(0.0, 0.0, 0.0);
+		parameters.size = Vector3(40.0, 20.0, 40.0);
+		parameters.featureScale = 4.0;
+		parameters.coverage = 0.08;
+		parameters.extinction = 50.0;
+		parameters.detail = 0.0;
+		parameters.erosion = 0.0;
+		parameters.puffiness = 0.0;
+		parameters.towering = 0.45;
+		parameters.dominance = 1.0;
+		parameters.overhang = 0.0;
+		parameters.fineDetail = 0.0;
+		parameters.offset = Vector3(12.0, 0.0, 0.0);
+		parameters.seed = 1907;
+		CloudVolume shiftedCloud(parameters);
+		parameters.offset = Vector3(0.0, 0.0, 0.0);
+		CloudVolume unshiftedCloud(parameters);
+
+		Vector3 rayOrigin;
+		bool foundIsolatedShiftedColumn = false;
+		for (double z = -18.0; z <= 18.0 && !foundIsolatedShiftedColumn; z += 2.0)
+		{
+			for (double x = -18.0; x <= 18.0 && !foundIsolatedShiftedColumn; x += 2.0)
+			{
+				double shiftedMaximum = 0.0;
+				double unshiftedNeighborhoodMaximum = 0.0;
+				for (double y = -9.0; y <= 9.0; y += 0.5)
+				{
+					shiftedMaximum = std::max(
+						shiftedMaximum,
+						shiftedCloud.densityAt(Vector3(x, y, z))
+					);
+					for (double dz = -4.0; dz <= 4.0; dz += 2.0)
+						for (double dx = -4.0; dx <= 4.0; dx += 2.0)
+						{
+							unshiftedNeighborhoodMaximum = std::max(
+								unshiftedNeighborhoodMaximum,
+								unshiftedCloud.densityAt(Vector3(x + dx, y, z + dz))
+							);
+						}
+				}
+				if (shiftedMaximum > 0.8 && unshiftedNeighborhoodMaximum == 0.0)
+				{
+					rayOrigin = Vector3(x, 15.0, z);
+					foundIsolatedShiftedColumn = true;
+				}
+			}
+		}
+		require(
+			foundIsolatedShiftedColumn,
+			"Cloud offset regression fixture found no isolated shifted density column."
+		);
+
+		Sampler::setRenderSeed(0x7391u);
+		Sampler::beginPixelSample(7, 11, 0);
+		Ray ray(rayOrigin, Vector3(0.0, -1.0, 0.0));
+		HitRecord hitRecord;
+		const bool hit = shiftedCloud.hit(ray, hitRecord, T_MIN, T_MAX);
+		Sampler::endPixelSample();
+		require(hit, "Delta tracking skipped density translated into an otherwise empty lobe-grid column.");
+		require(
+			shiftedCloud.densityAt(hitRecord.position) > 0.0,
+			"Shifted cloud accepted a collision outside its translated density field."
+		);
+	}
+
+	void	testIdenticalCloudInstancesUseIndependentTrackingStreams(void)
+	{
+		CloudParameters parameters = CloudVolume::preset(CloudType::Cumulus);
+		parameters.position = Vector3(0.0, 0.0, 0.0);
+		parameters.size = Vector3(20.0, 10.0, 20.0);
+		parameters.featureScale = 4.0;
+		parameters.coverage = 1.0;
+		parameters.erosion = 0.0;
+		parameters.extinction = 100.0;
+		parameters.seed = 77;
+		CloudVolume firstCloud(parameters);
+		CloudVolume secondCloud(parameters);
+
+		Sampler::setRenderSeed(2024);
+		bool foundIndependentCollision = false;
+		for (std::uint32_t sampleIndex = 0; sampleIndex < 4; sampleIndex++)
+		{
+			Sampler::beginPixelSample(3, 5, sampleIndex);
+			Ray firstRay(Vector3(0.0, 0.0, 15.0), Vector3(0.0, 0.0, -1.0));
+			Ray secondRay = firstRay;
+			HitRecord firstHit;
+			HitRecord secondHit;
+			const bool firstCollided = firstCloud.hit(firstRay, firstHit, T_MIN, T_MAX);
+			const bool secondCollided = secondCloud.hit(secondRay, secondHit, T_MIN, T_MAX);
+			Sampler::endPixelSample();
+			require(firstCollided && secondCollided, "Dense identical clouds did not both produce a collision.");
+			if (std::fabs(firstHit.t0 - secondHit.t0) > 1e-12)
+				foundIndependentCollision = true;
+		}
+		require(
+			foundIndependentCollision,
+			"Identical cloud instances reused the same free-flight sampling stream."
+		);
+	}
+
+	void	testProceduralCloudMorphologyEnvelopes(void)
+	{
+		auto occupiedSlice = [](
+			const CloudVolume& cloud,
+			const CloudParameters& parameters,
+			double height
+		) {
+			constexpr int WIDTH = 41;
+			constexpr int DEPTH = 31;
+			std::size_t occupied = 0;
+			const double y = parameters.position.getY()
+				+ (height - 0.5) * parameters.size.getY();
+			for (int z = 0; z < DEPTH; z++)
+				for (int x = 0; x < WIDTH; x++)
+				{
+					const Vector3 position(
+						parameters.position.getX()
+							+ (static_cast<double>(x) / (WIDTH - 1) - 0.5)
+								* parameters.size.getX(),
+						y,
+						parameters.position.getZ()
+							+ (static_cast<double>(z) / (DEPTH - 1) - 0.5)
+								* parameters.size.getZ()
+					);
+					if (cloud.densityAt(position) > 0.05)
+						occupied++;
+				}
+			return (occupied);
+		};
+
+		CloudParameters storm = CloudVolume::preset(CloudType::Cumulonimbus);
+		storm.position = Vector3(0.0, 0.0, 0.0);
+		storm.size = Vector3(14500.0, 14500.0, 10500.0);
+		storm.coverage = 0.34;
+		storm.featureScale = 1350.0;
+		storm.macroScale = 1.35;
+		storm.towering = 1.0;
+		storm.dominance = 0.96;
+		storm.overhang = 0.98;
+		storm.fineDetail = 0.90;
+		for (const std::uint32_t seed : std::array<std::uint32_t, 3>{73u, 1937u, 7193u})
+		{
+			storm.seed = seed;
+			const CloudVolume cumulonimbus(storm);
+			const std::size_t crownArea = occupiedSlice(cumulonimbus, storm, 0.80);
+			const std::size_t apexArea = occupiedSlice(cumulonimbus, storm, 0.94);
+			require(apexArea > 0, "Cumulonimbus morphology lost its overshooting top.");
+			require(
+				crownArea > apexArea * 3,
+				"Cumulonimbus crown did not taper back to a rounded overshooting top."
+			);
+		}
+
+		CloudParameters deck = CloudVolume::preset(CloudType::Stratocumulus);
+		deck.position = Vector3(0.0, 0.0, 0.0);
+		deck.size = Vector3(52000.0, 2600.0, 48000.0);
+		deck.coverage = 0.62;
+		deck.featureScale = 1750.0;
+		deck.towering = 0.30;
+		for (const std::uint32_t seed : std::array<std::uint32_t, 3>{4401u, 811u, 2267u})
+		{
+			deck.seed = seed;
+			const CloudVolume stratocumulus(deck);
+			const std::size_t lowerDeckArea = occupiedSlice(stratocumulus, deck, 0.12);
+			const std::size_t upperDeckArea = occupiedSlice(stratocumulus, deck, 0.32);
+			require(
+				lowerDeckArea > 41u * 31u / 6u,
+				"Stratocumulus weather field regressed to sparse isolated cells."
+			);
+			require(
+				upperDeckArea * 4 < lowerDeckArea,
+				"Stratocumulus cells escaped their shallow condensation layer."
+			);
+		}
+
+		CloudParameters lowDetail = CloudVolume::preset(CloudType::Cumulus);
+		lowDetail.position = Vector3(0.0, 0.0, 0.0);
+		lowDetail.size = Vector3(20.0, 12.0, 20.0);
+		lowDetail.featureScale = 4.0;
+		lowDetail.coverage = 0.80;
+		lowDetail.detail = 0.0;
+		lowDetail.erosion = 0.0;
+		lowDetail.fineDetail = 0.20;
+		lowDetail.seed = 291;
+		const CloudVolume fallback(lowDetail);
+		require(
+			occupiedSlice(fallback, lowDetail, 0.25) > 0,
+			"Low-detail cloud lost its legacy child-lobe fallback."
+		);
+	}
+
+	void	testStratusVerticalEnvelopeVariesAcrossWeatherField(void)
+	{
+		auto remappedDensityInput = [](double density) {
+			if (density <= 0.0)
+				return (0.025);
+			if (density >= 1.0)
+				return (0.38);
+			double low = 0.0;
+			double high = 1.0;
+			for (int iteration = 0; iteration < 32; iteration++)
+			{
+				const double middle = 0.5 * (low + high);
+				const double mapped = middle * middle * (3.0 - 2.0 * middle);
+				if (mapped < density)
+					low = middle;
+				else
+					high = middle;
+			}
+			return (0.025 + 0.355 * 0.5 * (low + high));
+		};
+
+		CloudParameters parameters = CloudVolume::preset(CloudType::Stratus);
+		parameters.position = Vector3(0.0, 0.0, 0.0);
+		// Keep vertical structure noise effectively constant through each column,
+		// while spanning many independent weather features horizontally. This lets
+		// the public density field expose the envelope without a private test hook.
+		parameters.size = Vector3(42000.0, 0.01, 36000.0);
+		parameters.featureScale = 1800.0;
+		parameters.coverage = 0.72;
+		parameters.detail = 0.0;
+		parameters.erosion = 0.0;
+		parameters.puffiness = 0.0;
+
+		for (const std::uint32_t seed : std::array<std::uint32_t, 3>{101u, 1009u, 7919u})
+		{
+			parameters.seed = seed;
+			const CloudVolume stratus(parameters);
+			double minimumBase = 1.0;
+			double maximumBase = 0.0;
+			double minimumTop = 1.0;
+			double maximumTop = 0.0;
+			std::size_t measuredColumns = 0;
+
+			for (int z = 1; z < 12; z++)
+				for (int x = 1; x < 16; x++)
+				{
+					const double worldX = parameters.position.getX()
+						+ (static_cast<double>(x) / 16.0 - 0.5) * parameters.size.getX();
+					const double worldZ = parameters.position.getZ()
+						+ (static_cast<double>(z) / 12.0 - 0.5) * parameters.size.getZ();
+					auto densityAtHeight = [&](double height) {
+						return (stratus.densityAt(Vector3(
+							worldX,
+							parameters.position.getY() + (height - 0.5) * parameters.size.getY(),
+							worldZ
+						)));
+					};
+					const double middleInput = remappedDensityInput(densityAtHeight(0.5));
+					if (middleInput < 0.08 || middleInput > 0.34)
+						continue;
+					auto envelopeRatio = [&](double height) {
+						return (remappedDensityInput(densityAtHeight(height)) / middleInput);
+					};
+
+					double low = 0.0;
+					double high = 0.20;
+					if (envelopeRatio(low) >= 0.5 || envelopeRatio(high) < 0.5)
+						continue;
+					for (int iteration = 0; iteration < 14; iteration++)
+					{
+						const double candidate = 0.5 * (low + high);
+						if (envelopeRatio(candidate) < 0.5)
+							low = candidate;
+						else
+							high = candidate;
+					}
+					const double base = 0.5 * (low + high);
+
+					low = 0.55;
+					high = 0.99;
+					if (envelopeRatio(low) < 0.5 || envelopeRatio(high) >= 0.5)
+						continue;
+					for (int iteration = 0; iteration < 14; iteration++)
+					{
+						const double candidate = 0.5 * (low + high);
+						if (envelopeRatio(candidate) >= 0.5)
+							low = candidate;
+						else
+							high = candidate;
+					}
+					const double top = 0.5 * (low + high);
+
+					minimumBase = std::min(minimumBase, base);
+					maximumBase = std::max(maximumBase, base);
+					minimumTop = std::min(minimumTop, top);
+					maximumTop = std::max(maximumTop, top);
+					measuredColumns++;
+				}
+
+			require(
+				measuredColumns >= 12,
+				"Stratus envelope fixture found too few unsaturated weather columns."
+			);
+			require(
+				maximumBase - minimumBase > 0.012,
+				"Stratus base remained effectively planar across the weather field."
+			);
+			require(
+				maximumTop - minimumTop > 0.045,
+				"Stratus top remained effectively planar across the weather field."
+			);
+		}
+	}
+
+	void	testEveryProceduralCloudPresetProducesFiniteDensity(void)
+	{
+		const std::array<CloudType, 5> cloudTypes = {
+			CloudType::Cumulus,
+			CloudType::Stratocumulus,
+			CloudType::Stratus,
+			CloudType::Cirrus,
+			CloudType::Cumulonimbus
+		};
+
+		for (const CloudType type : cloudTypes)
+		{
+			CloudParameters parameters = CloudVolume::preset(type);
+			parameters.seed = 100u + static_cast<std::uint32_t>(type);
+			const CloudVolume cloud(parameters);
+			double maximumDensity = 0.0;
+			for (int y = -4; y <= 4; y++)
+				for (int z = -5; z <= 5; z++)
+					for (int x = -5; x <= 5; x++)
+					{
+						const Vector3 position(
+							parameters.position.getX() + parameters.size.getX() * 0.09 * x,
+							parameters.position.getY() + parameters.size.getY() * 0.10 * y,
+							parameters.position.getZ() + parameters.size.getZ() * 0.09 * z
+						);
+						const double density = cloud.densityAt(position);
+						require(
+							std::isfinite(density) && density >= 0.0 && density <= 1.0,
+							std::string("Cloud preset produced invalid density: ")
+								+ CloudVolume::typeName(type)
+						);
+						maximumDensity = std::max(maximumDensity, density);
+					}
+			require(
+				maximumDensity > 0.0,
+				std::string("Cloud preset produced an empty field: ")
+					+ CloudVolume::typeName(type)
+			);
+			require(
+				CloudVolume::parseType(CloudVolume::typeName(type)) == type,
+				"Cloud preset name did not round-trip."
+			);
+		}
+
+		CloudParameters extremeOffset = CloudVolume::preset(CloudType::Cirrus);
+		extremeOffset.detailOctaves = 8;
+		extremeOffset.offset = Vector3(extremeOffset.featureScale * 3000000.0, 0.0, 0.0);
+		requireThrows(
+			[&extremeOffset]()
+			{
+				CloudVolume invalidCloud(extremeOffset);
+				(void)invalidCloud;
+			},
+			"Cloud accepted a noise offset whose amplified octave coordinates overflow int."
+		);
 	}
 
 	void	testVolumeShadowTransmittance(void)
@@ -4007,6 +4589,32 @@ namespace
 		require(hitRecord.t0 >= T_MIN, "Inside volume hit was behind the ray minimum.");
 		require(hitRecord.t0 < 10.0, "Inside volume hit was beyond the boundary exit.");
 		require(hitRecord.material != nullptr && hitRecord.material->getType() == ISOTROPIC, "Inside volume hit did not use the phase material.");
+	}
+
+	void	testIdenticalConstantVolumesUseIndependentTrackingStreams(void)
+	{
+		const auto boundary = std::make_shared<Sphere>(
+			Vector3(0.0, 0.0, 0.0),
+			10.0,
+			std::make_shared<Lambertian>(Color(0.0, 0.0, 0.0))
+		);
+		const auto phase = std::make_shared<Isotropic>(Color(1.0, 1.0, 1.0));
+		ConstantVolume firstVolume(boundary, phase, 100.0);
+		ConstantVolume secondVolume(boundary, phase, 100.0);
+		Sampler::setRenderSeed(90210u);
+		Sampler::beginPixelSample(13, 17, 0);
+		Ray firstRay(Vector3(0.0, 0.0, 15.0), Vector3(0.0, 0.0, -1.0));
+		Ray secondRay = firstRay;
+		HitRecord firstHit;
+		HitRecord secondHit;
+		const bool firstCollided = firstVolume.hit(firstRay, firstHit, T_MIN, T_MAX);
+		const bool secondCollided = secondVolume.hit(secondRay, secondHit, T_MIN, T_MAX);
+		Sampler::endPixelSample();
+		require(firstCollided && secondCollided, "Dense identical constant volumes did not both collide.");
+		require(
+			std::fabs(firstHit.t0 - secondHit.t0) > 1e-12,
+			"Identical constant volumes reused the same free-flight sampling stream."
+		);
 	}
 
 	void	testBoxVolumeHitWorksFromInsideBoundary(void)
@@ -4984,6 +5592,138 @@ namespace
 		requireNear(emptySample.transmittance.getBlue(), 1.0, "Empty atmosphere segment blue transmittance should be one.");
 	}
 
+	void	testAtmosphereWorkingSpaceTransmittanceSemigroup(void)
+	{
+		const double earthRadius = 1.0;
+		const double atmosphereRadius = 200001.0;
+		const double scaleHeight = 1.0e9;
+		const double fullDistance = 100000.0;
+		const double integrationDistance = fullDistance - T_MIN;
+		const double splitT = T_MIN + integrationDistance * 0.5;
+		const Atmosphere fullAtmosphere(
+			0.0,
+			earthRadius,
+			atmosphereRadius,
+			scaleHeight,
+			scaleHeight,
+			2,
+			1,
+			0.0
+		);
+		const Atmosphere halfAtmosphere(
+			0.0,
+			earthRadius,
+			atmosphereRadius,
+			scaleHeight,
+			scaleHeight,
+			1,
+			1,
+			0.0
+		);
+		const Ray fullRay(Vector3(earthRadius, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+		const Color full = fullAtmosphere.sampleTransmittance(fullRay, fullDistance);
+		const Color firstHalf = halfAtmosphere.sampleTransmittance(fullRay, splitT);
+		const Ray secondHalfRay(
+			fullRay.pointAtRay(splitT - T_MIN),
+			fullRay.getDirection()
+		);
+		const Color secondHalf = halfAtmosphere.sampleTransmittance(
+			secondHalfRay,
+			integrationDistance * 0.5 + T_MIN
+		);
+		const Color composed = firstHalf * secondHalf;
+
+		requireNearTolerance(full.getRed(), composed.getRed(), 1e-12,
+			"Atmosphere working-space red attenuation violates Beer-Lambert composition.");
+		requireNearTolerance(full.getGreen(), composed.getGreen(), 1e-12,
+			"Atmosphere working-space green attenuation violates Beer-Lambert composition.");
+		requireNearTolerance(full.getBlue(), composed.getBlue(), 1e-12,
+			"Atmosphere working-space blue attenuation violates Beer-Lambert composition.");
+	}
+
+	void	testAtmosphereInScatteringUsesViewMidpointDepth(void)
+	{
+		constexpr double earthRadius = 1000.0;
+		constexpr double atmosphereRadius = 1100.0;
+		constexpr double hR = 100.0;
+		constexpr double hM = 50.0;
+		constexpr double tMax = 10.0;
+		constexpr double mieG = 0.76;
+		constexpr double mieAbsorptionScale = 1.1;
+		Atmosphere atmosphere(0.0, earthRadius, atmosphereRadius, hR, hM, 1, 1, 0.0);
+		atmosphere.setSunDirection(Vector3(1.0, 0.0, 0.0));
+		const Ray ray(Vector3(earthRadius + 1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+		const Color actual = atmosphere.sampleSegment(ray, tMax).inScattering;
+
+		const double segmentLength = tMax - T_MIN;
+		const double sampleT = T_MIN + 0.5 * segmentLength;
+		const double sampleHeight = 1.0 + sampleT;
+		const double sampleOpticalDepthR = std::exp(-sampleHeight / hR) * segmentLength;
+		const double sampleOpticalDepthM = std::exp(-sampleHeight / hM) * segmentLength;
+		const double lightLength = atmosphereRadius - (earthRadius + sampleHeight);
+		const double lightSampleHeight = sampleHeight + 0.5 * lightLength;
+		const double lightOpticalDepthR = std::exp(-lightSampleHeight / hR) * lightLength;
+		const double lightOpticalDepthM = std::exp(-lightSampleHeight / hM) * lightLength;
+		const Vector3 tau = Atmosphere::betaR
+			* (0.5 * sampleOpticalDepthR + lightOpticalDepthR)
+			+ Atmosphere::betaM * mieAbsorptionScale
+				* (0.5 * sampleOpticalDepthM + lightOpticalDepthM);
+		const Vector3 attenuation(
+			std::exp(-tau.getX()),
+			std::exp(-tau.getY()),
+			std::exp(-tau.getZ())
+		);
+		const double phaseR = 3.0 / (8.0 * D_PI);
+		const double mieDenominator = std::pow(1.0 - mieG, 3.0);
+		const double phaseM = 3.0 / (8.0 * D_PI)
+			* (1.0 - mieG * mieG) * 2.0
+			/ ((2.0 + mieG * mieG) * mieDenominator);
+		const Vector3 sunRadiance = static_cast<Vector3>(
+			ColorManagement::linearSRGBFromACEScg(atmosphere.getSunRadiance())
+			* atmosphere.getSunRadianceScale()
+		);
+		const Vector3 expectedLinearSRGB = (
+			attenuation * sampleOpticalDepthR * Atmosphere::betaR * phaseR
+			+ attenuation * sampleOpticalDepthM * Atmosphere::betaM * phaseM
+		) * sunRadiance;
+		const Color expected = ColorManagement::acescgFromLinearSRGB(Color(
+			expectedLinearSRGB.getX(),
+			expectedLinearSRGB.getY(),
+			expectedLinearSRGB.getZ()
+		));
+
+		requireNearTolerance(actual.getRed(), expected.getRed(), 1e-10,
+			"Atmosphere red in-scattering did not attenuate from the view-segment midpoint.");
+		requireNearTolerance(actual.getGreen(), expected.getGreen(), 1e-10,
+			"Atmosphere green in-scattering did not attenuate from the view-segment midpoint.");
+		requireNearTolerance(actual.getBlue(), expected.getBlue(), 1e-10,
+			"Atmosphere blue in-scattering did not attenuate from the view-segment midpoint.");
+	}
+
+	void	testAtmosphereAnalyticallyOccludesNearHorizonSun(void)
+	{
+		constexpr double earthRadius = 1000.0;
+		Atmosphere atmosphere(0.0, earthRadius, 1100.0, 100.0, 50.0, 1, 1, 0.0);
+		const Ray viewRay(Vector3(earthRadius + 1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+		const double tangentComponent = std::sqrt(1.0 - 0.06 * 0.06);
+
+		atmosphere.setSunDirection(Vector3(-0.06, tangentComponent, 0.0));
+		const Color occluded = atmosphere.sampleSegment(viewRay, 1.0).inScattering;
+		requireColorNear(
+			occluded,
+			Color(0.0, 0.0, 0.0),
+			"A shallow Earth chord leaked sunlight between atmosphere light samples"
+		);
+
+		atmosphere.setSunDirection(Vector3(0.06, tangentComponent, 0.0));
+		const Color visible = atmosphere.sampleSegment(viewRay, 1.0).inScattering;
+		requireFiniteNonNegativeColor(visible, "Visible near-horizon atmosphere sunlight");
+		require(
+			Utilities::luminance(visible) > 0.0,
+			"Analytic Earth occlusion rejected a near-horizon sun ray directed away from the planet."
+		);
+	}
+
 	void	testAtmosphereDiffuseSkyRadianceCache(void)
 	{
 		Atmosphere atmosphere(0.0, 6360000.0, 6420000.0, 7994.0, 1200.0, 8, 4, 0.0);
@@ -5097,13 +5837,232 @@ namespace
 			std::make_shared<Emissive>(surfaceEmission)
 		));
 
-		const Color protrudingExpected = atmosphereSample.inScattering + (atmosphereSample.transmittance * surfaceEmission);
+		const AtmosphereSample protrudingAtmosphereSample = atmosphere.sampleSegment(ray, 2.5);
+		const Color protrudingExpected = protrudingAtmosphereSample.inScattering
+			+ (protrudingAtmosphereSample.transmittance * surfaceEmission);
 		const Color protrudingActual = Renderer::internal::_calculateLightRaysColor(ray, protrudingScene);
 		requireFiniteNonNegativeColor(protrudingActual, "Atmosphere protruding primary-hit composite");
 		requireColorNear(
 			protrudingActual,
 			protrudingExpected,
-			"Atmosphere protruding primary-hit should use analytic ground depth"
+			"Atmosphere protruding primary-hit should stop at the actual surface"
+		);
+	}
+
+	void	testPrimaryCloudControlStopsAtCameraSurfaces(void)
+	{
+		constexpr double extinction = 0.25;
+		Renderer::internal::RenderCamera renderCamera;
+		renderCamera.width = 1.0;
+		renderCamera.height = 1.0;
+		renderCamera.inverseWidth = 1.0;
+		renderCamera.inverseHeight = 1.0;
+		renderCamera.position = Vector3(0.0, 0.0, 0.0);
+		renderCamera.lowerLeftCorner = Vector3(0.0, 0.0, -1.0);
+
+		auto controlSample = [&renderCamera, extinction](std::shared_ptr<Hittable> cameraBlocker)
+		{
+			Scene scene;
+			scene.setRenderSky(SKY_NONE);
+			scene.setBackgroundColor(Color(0.0, 0.0, 0.0));
+			scene.setMaxLightBounces(0);
+			scene.addHittable(std::make_shared<TestPrimaryDensityVolume>(2.0, 6.0, extinction));
+			scene.addHittable(std::make_shared<DirectionalLight>(
+				Vector3(-1.0, 0.0, 0.0),
+				std::make_shared<Emissive>(Color(1.0, 1.0, 1.0))
+			));
+			if (cameraBlocker)
+				scene.addHittable(cameraBlocker);
+			scene.updateLights();
+
+			Sampler::beginPixelSample(29, 31, 0);
+			const Renderer::internal::RenderSample sample = Renderer::internal::_calculatePixelSample(
+				scene,
+				renderCamera,
+				0,
+				0,
+				true
+			);
+			Sampler::endPixelSample();
+			return (sample);
+		};
+
+		const Renderer::internal::RenderSample unobstructedSample = controlSample(nullptr);
+		const double unobstructedOpacity = unobstructedSample.primaryVolumeOpacity;
+		requireNearTolerance(
+			unobstructedOpacity,
+			1.0 - std::exp(-extinction * 4.0),
+			1e-6,
+			"Primary cloud control integrated the wrong unobstructed interval."
+		);
+
+		const Renderer::internal::RenderSample glassSample = controlSample(std::make_shared<Sphere>(
+			Vector3(0.0, 0.0, -1.0),
+			0.25,
+			std::make_shared<Dielectric>(Color(1.0, 1.0, 1.0), 1.5)
+		));
+		requireNearTolerance(
+			glassSample.primaryVolumeOpacity,
+			0.0,
+			1e-6,
+			"Primary cloud control leaked through a dielectric on the unrefracted camera ray."
+		);
+		requireColorNear(
+			glassSample.primarySingleScattering,
+			Color(0.0, 0.0, 0.0),
+			"Primary cloud control double-counted deterministic lighting behind a dielectric."
+		);
+
+		const double phaseOpacity = controlSample(std::make_shared<Sphere>(
+			Vector3(0.0, 0.0, -1.0),
+			0.25,
+			std::make_shared<HenyeyGreenstein>(Color(1.0, 1.0, 1.0), 0.0)
+		)).primaryVolumeOpacity;
+		requireNearTolerance(
+			phaseOpacity,
+			unobstructedOpacity,
+			1e-6,
+			"Volume-phase geometry incorrectly clipped primary cloud control."
+		);
+
+		const double opaqueOpacity = controlSample(std::make_shared<Sphere>(
+			Vector3(0.0, 0.0, -5.0),
+			1.0,
+			std::make_shared<Lambertian>(Color(0.5, 0.5, 0.5))
+		)).primaryVolumeOpacity;
+		requireNearTolerance(
+			opaqueOpacity,
+			1.0 - std::exp(-extinction * 2.0),
+			1e-6,
+			"Opaque camera surface did not clip primary cloud control."
+		);
+	}
+
+	void	testPrimaryCloudControlReconstructsEnvironmentEnergy(void)
+	{
+		constexpr double extinction = 0.25;
+		constexpr double falloff = 0.5;
+		constexpr double compensation = 1.0;
+		const Color environmentRadiance(0.2, 0.4, 0.8);
+		Renderer::internal::RenderCamera renderCamera;
+		renderCamera.width = 1.0;
+		renderCamera.height = 1.0;
+		renderCamera.inverseWidth = 1.0;
+		renderCamera.inverseHeight = 1.0;
+		renderCamera.position = Vector3(0.0, 0.0, 0.0);
+		renderCamera.lowerLeftCorner = Vector3(0.0, 0.0, -1.0);
+
+		auto controlRadiance = [&renderCamera, extinction, falloff, compensation, environmentRadiance](
+			bool environmentLighting,
+			double environmentStrength,
+			double directionalDepth,
+			std::shared_ptr<EnvironmentMap> environment = nullptr,
+			std::shared_ptr<Hittable> blocker = nullptr
+		)
+		{
+			Scene scene;
+			scene.setRenderSky(SKY_ENVIRONMENT);
+			if (!environment)
+			{
+				environment = std::make_shared<EnvironmentMap>(
+					1,
+					1,
+					std::vector<Color>{environmentRadiance}
+				);
+			}
+			scene.setEnvironmentMap(environment);
+			scene.setEnvironmentLighting(environmentLighting);
+			scene.setEnvironmentStrength(environmentStrength);
+			scene.setMaxLightBounces(0);
+			scene.addHittable(std::make_shared<TestPrimaryDensityVolume>(
+				2.0,
+				6.0,
+				extinction,
+				falloff,
+				compensation,
+				directionalDepth
+			));
+			if (blocker)
+				scene.addHittable(blocker);
+			scene.updateLights();
+
+			Sampler::beginPixelSample(37, 41, 0);
+			const Renderer::internal::RenderSample sample = Renderer::internal::_calculatePixelSample(
+				scene,
+				renderCamera,
+				0,
+				0,
+				true
+			);
+			Sampler::endPixelSample();
+			return (sample.primarySingleScattering);
+		};
+
+		const double orderGain = falloff + std::pow(falloff, 2.0)
+			+ std::pow(falloff, 3.0) + std::pow(falloff, 4.0);
+		const double cameraOpacity = 1.0 - std::exp(-extinction * 4.0);
+		const Color fullyVisible = environmentRadiance
+			* (2.0 * orderGain * compensation * cameraOpacity);
+		const Color deeplyAttenuated = fullyVisible * std::exp(-0.05 * 100.0);
+
+		requireColorNear(
+			controlRadiance(true, 2.0, -1.0),
+			fullyVisible,
+			"Cacheless environment reconstruction did not use its deterministic shadow fallback."
+		);
+		requireColorNear(
+			controlRadiance(true, 2.0, 100.0),
+			deeplyAttenuated,
+			"Environment reconstruction ignored upward cloud optical depth."
+		);
+		requireColorNear(
+			controlRadiance(true, 2.0, 0.0),
+			fullyVisible,
+			"Environment visibility floor changed fully open cloud lighting."
+		);
+		requireColorNear(
+			controlRadiance(false, 2.0, 0.0),
+			Color(0.0, 0.0, 0.0),
+			"Disabled environment lighting leaked into primary cloud reconstruction."
+		);
+
+		const std::shared_ptr<Hittable> enclosure = std::make_shared<Sphere>(
+			Vector3(0.0, 0.0, 0.0),
+			10.0,
+			std::make_shared<Lambertian>(Color(0.5, 0.5, 0.5))
+		);
+		requireColorNear(
+			controlRadiance(true, 2.0, 0.0, nullptr, enclosure),
+			Color(0.0, 0.0, 0.0),
+			"Opaque enclosure leaked environment energy into cloud reconstruction."
+		);
+
+		const std::shared_ptr<EnvironmentMap> lowerHemisphere =
+			std::make_shared<EnvironmentMap>(1, 4, std::vector<Color>{
+				Color(0.0, 0.0, 0.0),
+				Color(0.0, 0.0, 0.0),
+				Color(0.4, 0.6, 1.0),
+				Color(0.4, 0.6, 1.0)
+			});
+		const Color unobstructedLower = controlRadiance(
+			true,
+			1.0,
+			0.0,
+			lowerHemisphere
+		);
+		const std::shared_ptr<Hittable> ground = std::make_shared<Sphere>(
+			Vector3(0.0, -1001.0, -4.0),
+			1000.0,
+			std::make_shared<Lambertian>(Color(0.5, 0.5, 0.5))
+		);
+		require(
+			Utilities::luminance(unobstructedLower) > 0.0,
+			"Lower-hemisphere environment fixture produced no open-cloud energy."
+		);
+		requireColorNear(
+			controlRadiance(true, 1.0, 0.0, lowerHemisphere, ground),
+			Color(0.0, 0.0, 0.0),
+			"Opaque ground leaked lower-hemisphere environment energy into cloud reconstruction."
 		);
 	}
 
@@ -5497,8 +6456,8 @@ namespace
 			"Raw render incorrectly reported display exposure diagnostics."
 		);
 		require(
-			scene.getRenderStats().renderedSamples == 8,
-			"Stable background did not stop at its two-sample adaptive floor."
+			scene.getRenderStats().renderedSamples == 16,
+			"Stable background did not stop at its four-sample cloud-control floor."
 		);
 		for (std::size_t y = 0; y < scene.getImage()->getHeight(); y++)
 		{
@@ -5621,6 +6580,7 @@ namespace
 				buffers.colorA[index] = Color(checker, checker, checker);
 				buffers.colorB[index] = Color(checker, checker, checker);
 				buffers.colorVariance[index] = 0.25;
+				buffers.sampleCount[index] = 64u;
 				buffers.deterministicColor[index] = Color(0.2, 0.2, 0.2);
 				buffers.featuresA[index][0] = static_cast<double>(x) / 8.0;
 				buffers.featuresA[index][1] = static_cast<double>(y) / 8.0;
@@ -5670,6 +6630,7 @@ namespace
 				buffers.colorA[index] = Color(sample, sample, sample);
 				buffers.colorB[index] = Color(sample, sample, sample);
 				buffers.colorVariance[index] = 0.08;
+				buffers.sampleCount[index] = 96u;
 				buffers.deterministicColor[index] = Color(0.1, 0.1, 0.1);
 				buffers.volumeOpacity[index] = denseBillow ? 0.92 : 0.18;
 				buffers.featuresA[index][0] = static_cast<double>(x) / 14.0;
@@ -5726,7 +6687,6 @@ namespace
 				buffers.colorA[index] = Color(detail, detail, detail);
 				buffers.colorB[index] = Color(detail, detail, detail);
 				buffers.colorVariance[index] = 1e-8;
-				buffers.sampleCount[index] = 128u;
 				buffers.deterministicColor[index] = Color(0.1, 0.1, 0.1);
 				buffers.volumeOpacity[index] = 0.6;
 				buffers.featuresA[index][0] = static_cast<double>(x) / 8.0;
@@ -5745,21 +6705,94 @@ namespace
 
 		Denoise::NFORSettings settings;
 		settings.threadCount = 1;
-		std::unique_ptr<Image> denoised = Denoise::applyNFOR(buffers, settings);
-		const double darkDetail = denoised->getPixel(4, 4).getRed();
-		const double brightDetail = denoised->getPixel(5, 4).getRed();
+		for (const unsigned int samples : {96u, 128u})
+		{
+			std::fill(buffers.sampleCount.begin(), buffers.sampleCount.end(), samples);
+			std::unique_ptr<Image> denoised = Denoise::applyNFOR(buffers, settings);
+			const double darkDetail = denoised->getPixel(4, 4).getRed();
+			const double brightDetail = denoised->getPixel(5, 4).getRed();
 
-		requireNearTolerance(
-			darkDetail,
-			0.20,
-			0.02,
-			"Volume denoiser blurred a converged dark density feature."
+			requireNearTolerance(
+				darkDetail,
+				0.20,
+				0.02,
+				"Volume denoiser blurred a converged dark density feature."
+			);
+			requireNearTolerance(
+				brightDetail,
+				0.40,
+				0.02,
+				"Volume denoiser blurred a converged bright density feature."
+			);
+		}
+	}
+
+	void	testNFORVolumeVarianceTransitionHasNo64SampleCliff(void)
+	{
+		auto residualContrast = [](unsigned int sampleCount)
+		{
+			Denoise::NFORBuffers buffers;
+
+			buffers.initialize(9, 9);
+			for (std::size_t y = 0; y < buffers.height; y++)
+			{
+				for (std::size_t x = 0; x < buffers.width; x++)
+				{
+					const std::size_t index = buffers.index(x, y);
+					const double noisyShadow = (x + y) % 2 == 0 ? 0.065 : 0.005;
+
+					buffers.colorA[index] = Color(noisyShadow, noisyShadow, noisyShadow);
+					buffers.colorB[index] = buffers.colorA[index];
+					buffers.colorVariance[index] = 1e-8;
+					buffers.sampleCount[index] = sampleCount;
+					buffers.volumeOpacity[index] = 0.85;
+					buffers.featuresA[index][0] = static_cast<double>(x) / 8.0;
+					buffers.featuresA[index][1] = static_cast<double>(y) / 8.0;
+					buffers.featuresA[index][2] = 1.0;
+					buffers.featuresA[index][3] = 0.5;
+					buffers.featuresA[index][7] = 0.8;
+					buffers.featuresA[index][10] = static_cast<double>(HENYEY_GREENSTEIN)
+						/ static_cast<double>(PRINCIPLED);
+					buffers.featuresB[index] = buffers.featuresA[index];
+				}
+			}
+
+			Denoise::NFORSettings settings;
+			settings.threadCount = 1;
+			const std::unique_ptr<Image> denoised = Denoise::applyNFOR(buffers, settings);
+			return (std::fabs(
+				Utilities::luminance(denoised->getPixel(4, 4))
+				- Utilities::luminance(denoised->getPixel(5, 4))
+			));
+		};
+
+		const std::array<unsigned int, 12> sampleCounts = {
+			31u, 32u, 33u,
+			63u, 64u, 65u,
+			95u, 96u, 97u,
+			127u, 128u, 129u
+		};
+		std::array<double, sampleCounts.size()> contrasts{};
+		for (std::size_t index = 0; index < sampleCounts.size(); index++)
+			contrasts[index] = residualContrast(sampleCounts[index]);
+
+		require(
+			contrasts[4] > contrasts[1] + 0.01,
+			"NFOR did not begin restoring converged volume detail by the 64-sample floor."
 		);
-		requireNearTolerance(
-			brightDetail,
-			0.40,
-			0.02,
-			"Volume denoiser blurred a converged bright density feature."
+		for (std::size_t index = 1; index < contrasts.size(); index++)
+		{
+			require(
+				contrasts[index] + 0.002 >= contrasts[index - 1],
+				"NFOR volume-detail confidence decreased as sample count increased."
+			);
+		}
+		require(
+			std::fabs(contrasts[1] - contrasts[0]) <= 0.002
+				&& std::fabs(contrasts[2] - contrasts[1]) <= 0.002
+				&& std::fabs(contrasts[4] - contrasts[3]) <= 0.002
+				&& std::fabs(contrasts[5] - contrasts[4]) <= 0.002,
+			"NFOR volume filtering changed abruptly at a confidence-ramp boundary."
 		);
 	}
 
@@ -6099,6 +7132,33 @@ namespace
 		uniformParameters.dropletSizeMicrons = 0.0;
 		uniformParameters.primaryDetail = 4.0;
 		SparseGridVolume uniformVolume(uniformParameters);
+		GridVolumeParameters collisionParameters = uniformParameters;
+		collisionParameters.extinction = 10.0;
+		SparseGridVolume firstCollisionVolume(collisionParameters);
+		SparseGridVolume secondCollisionVolume(collisionParameters);
+		Sampler::beginPixelSample(41, 43, 0);
+		Ray firstCollisionRay(Vector3(-20.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0));
+		Ray secondCollisionRay = firstCollisionRay;
+		HitRecord firstCollision;
+		HitRecord secondCollision;
+		const bool firstGridCollided = firstCollisionVolume.hit(
+			firstCollisionRay,
+			firstCollision,
+			T_MIN,
+			T_MAX
+		);
+		const bool secondGridCollided = secondCollisionVolume.hit(
+			secondCollisionRay,
+			secondCollision,
+			T_MIN,
+			T_MAX
+		);
+		Sampler::endPixelSample();
+		require(firstGridCollided && secondGridCollided, "Dense identical grid volumes did not both collide.");
+		require(
+			std::fabs(firstCollision.t0 - secondCollision.t0) > 1e-12,
+			"Identical grid volumes reused the same free-flight sampling stream."
+		);
 		for (std::uint32_t sample = 0; sample < 32; sample++)
 		{
 			Sampler::beginPixelSample(5, 7, sample);
@@ -6574,6 +7634,8 @@ int	main(void)
 		testSceneFileBackgroundSetting();
 		testEnvironmentMapLoadsPPM();
 		testEnvironmentMapPhysicalMetrics();
+		testEnvironmentMapImportanceSampleUsesSolidAngleTexelJitter();
+		testEnvironmentMapImportanceSampleCosineMoment();
 		testSceneEnvironmentPhysicalCalibration();
 		testEnvironmentMapLoadsHDR();
 		testEnvironmentMapLoadsRLEHDR();
@@ -6624,8 +7686,14 @@ int	main(void)
 		testSceneFileRejectsAmbiguousMeasuredData();
 		testBVHReturnsClosestHit();
 		testVolumeHitWorksFromInsideBoundary();
+		testIdenticalConstantVolumesUseIndependentTrackingStreams();
 		testBoxVolumeHitWorksFromInsideBoundary();
 		testProceduralCloudDensityAndDeltaTracking();
+		testShiftedProceduralCloudDeltaTrackingUsesFieldSpace();
+		testIdenticalCloudInstancesUseIndependentTrackingStreams();
+		testProceduralCloudMorphologyEnvelopes();
+		testStratusVerticalEnvelopeVariesAcrossWeatherField();
+		testEveryProceduralCloudPresetProducesFiniteDensity();
 		testVolumeShadowTransmittance();
 		testTinyTriangleHitAndNormal();
 		testTrianglePDFAndRandomSampling();
@@ -6654,9 +7722,14 @@ int	main(void)
 		testPlanetaryHitRobustIntersections();
 		testAtmosphereIncidentLightInsideOutsideAndSunPosition();
 		testAtmosphereSegmentTransmittance();
+		testAtmosphereWorkingSpaceTransmittanceSemigroup();
+		testAtmosphereInScatteringUsesViewMidpointDepth();
+		testAtmosphereAnalyticallyOccludesNearHorizonSun();
 		testAtmosphereDiffuseSkyRadianceCache();
 		testAtmosphereMetersPerUnitPreservesPhysicalScale();
 		testAtmospherePrimaryHitCompositesSurface();
+		testPrimaryCloudControlStopsAtCameraSurfaces();
+		testPrimaryCloudControlReconstructsEnvironmentEnergy();
 		testSceneDefaultsEnableAdaptiveAndDenoise();
 		testRenderedSceneHasBasicVisualStructure();
 		testRenderedScenePostProcessingProducesDisplayableImage();
@@ -6672,6 +7745,7 @@ int	main(void)
 		testNFORVolumeResidualReconstructionRemovesCheckerVariance();
 		testNFORVolumeDensityGuidePreservesBillowBoundary();
 		testNFORPreservesConvergedVolumeDetail();
+		testNFORVolumeVarianceTransitionHasNo64SampleCliff();
 		testTinyAdaptiveDenoisedRender();
 		testTinyDenoisedRenderProducesCompanionImage();
 		testCameraRejectsInvalidPhysicalOptics();

@@ -20,8 +20,8 @@ namespace Renderer::internal
 	{
 		double	width = 0.0;
 		double	height = 0.0;
-		double	inverseWidthMinusOne = 0.0;
-		double	inverseHeightMinusOne = 0.0;
+		double	inverseWidth = 0.0;
+		double	inverseHeight = 0.0;
 		double	lensRadius = 0.0;
 		Vector3	position;
 		Vector3	u;

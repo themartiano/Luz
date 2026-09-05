@@ -100,6 +100,14 @@ class CloudVolume : public Hittable, public DensityVolume
 
 		bool		boundsInterval(const Ray& ray, double t_min, double t_max, double& entryT, double& exitT) const;
 		bool		sampleCollision(Ray& ray, double t_min, double t_max, double& hitT) const;
+		void		lobeGridCell(
+			const Ray& ray,
+			double t,
+			double exitT,
+			double boundaryEpsilonT,
+			bool& occupied,
+			double& cellExitT
+		) const;
 		bool		stableFeatureCollision(
 			const Ray& ray,
 			double t_min,
@@ -117,6 +125,7 @@ class CloudVolume : public Hittable, public DensityVolume
 		double		fbm(const Vector3& position, int octaves, std::uint32_t salt) const;
 
 		CloudParameters	_parameters;
+		std::uint32_t	_samplingStream;
 		Vector3		_minimum;
 		Vector3		_maximum;
 		double		_majorantSceneUnits;

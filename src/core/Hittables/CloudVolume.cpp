@@ -3,6 +3,7 @@
 #include "Sampler.hpp"
 #include "Utilities.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <limits>
@@ -39,6 +40,15 @@ namespace
 		value *= 0x846ca68bu;
 		value ^= value >> 16;
 		return (value);
+	}
+
+	std::uint32_t nextCloudSamplingStream(std::uint32_t seed)
+	{
+		static std::atomic<std::uint64_t> nextInstance{0};
+		const std::uint64_t instance = nextInstance.fetch_add(1, std::memory_order_relaxed);
+		const std::uint32_t foldedInstance = static_cast<std::uint32_t>(instance)
+			^ static_cast<std::uint32_t>(instance >> 32u);
+		return (mixBits(seed ^ mixBits(foldedInstance + 0x9e3779b9u)));
 	}
 
 	std::uint32_t latticeHash(int x, int y, int z, std::uint32_t seed, std::uint32_t salt)
@@ -222,7 +232,7 @@ const char* CloudVolume::typeName(CloudType type)
 }
 
 CloudVolume::CloudVolume(const CloudParameters& parameters)
-	: _parameters(parameters)
+	: _parameters(parameters), _samplingStream(nextCloudSamplingStream(parameters.seed))
 {
 	if (
 		!finiteVector(parameters.position)
@@ -294,15 +304,26 @@ CloudVolume::CloudVolume(const CloudParameters& parameters)
 	);
 	if (!std::isfinite(diagonal) || !std::isfinite(diagonal * this->_majorantSceneUnits))
 		throw std::invalid_argument("Cloud optical extent is too large.");
+	// gradientNoise converts lattice coordinates to int at every fBm octave.
+	// Validate the largest detail-frequency/octave amplification rather than
+	// only the base coordinate, so extreme but finite offsets cannot overflow.
+	const double maximumNoiseFrequency = 6.8 * std::pow(
+		2.03,
+		static_cast<double>(parameters.detailOctaves - 1)
+	);
+	const double maximumBaseNoiseCoordinate = (
+		static_cast<double>(std::numeric_limits<int>::max()) - 256.0
+	) / maximumNoiseFrequency;
 	for (int axis = 0; axis < 3; axis++)
 	{
-		const double minimumNoiseCoordinate = (this->_minimum[axis] + parameters.offset[axis]) / parameters.featureScale;
-		const double maximumNoiseCoordinate = (this->_maximum[axis] + parameters.offset[axis]) / parameters.featureScale;
+		const double axisScale = parameters.featureScale * (axis == 1 ? 0.78 : 1.0);
+		const double minimumNoiseCoordinate = (this->_minimum[axis] + parameters.offset[axis]) / axisScale;
+		const double maximumNoiseCoordinate = (this->_maximum[axis] + parameters.offset[axis]) / axisScale;
 		if (
 			!std::isfinite(minimumNoiseCoordinate)
 			|| !std::isfinite(maximumNoiseCoordinate)
-			|| std::fabs(minimumNoiseCoordinate) > 5.0e8
-			|| std::fabs(maximumNoiseCoordinate) > 5.0e8
+			|| std::fabs(minimumNoiseCoordinate) > maximumBaseNoiseCoordinate
+			|| std::fabs(maximumNoiseCoordinate) > maximumBaseNoiseCoordinate
 		)
 			throw std::invalid_argument("Cloud noise coordinates are outside the supported range.");
 	}
@@ -413,7 +434,18 @@ double CloudVolume::verticalProfile(double height, double growthNoise, double co
 			return (smoothstep(0.0, 0.045, h) * (1.0 - smoothstep(top - 0.16, top, h)));
 		}
 		case CloudType::Stratus:
-			return (smoothstep(0.0, 0.035, h) * (1.0 - smoothstep(0.76, 0.96, h)));
+		{
+			// Let the same mesoscale field that selects the layer also displace its
+			// boundaries. A fixed envelope makes a shallow deck reveal a ruler-flat
+			// top at grazing angles even though its density varies horizontally.
+			const double layerGrowth = clamp01(0.78 * growthNoise + 0.22 * coverageMask);
+			const double base = 0.015 + 0.055 * (1.0 - layerGrowth);
+			const double top = 0.76 + 0.21 * layerGrowth;
+			return (
+				smoothstep(base, base + 0.04, h)
+				* (1.0 - smoothstep(top - 0.18, top, h))
+			);
+		}
 		case CloudType::Cirrus:
 			return (smoothstep(0.04, 0.20, h) * (1.0 - smoothstep(0.68, 0.96, h)));
 		case CloudType::Cumulonimbus:
@@ -491,9 +523,20 @@ void CloudVolume::buildConvectiveLobes(void)
 
 	constexpr double TWO_PI = 6.28318530717958647692;
 	const double feature = this->_parameters.featureScale;
-	const double spacing = feature * (this->_parameters.type == CloudType::Stratocumulus ? 2.0 : 2.45);
-	const int gridX = clampedCeilToInt(this->_parameters.size.getX() / spacing, 2, 8);
-	const int gridZ = clampedCeilToInt(this->_parameters.size.getZ() / spacing, 2, 8);
+	// Smaller, overlapping macro cells keep the analytic primitives below the
+	// visible feature scale. Shallow decks need the densest tiling because their
+	// vertical extent cannot hide a sparse set of broad ellipsoids.
+	const double spacing = feature * (
+		this->_parameters.type == CloudType::Stratocumulus ? 1.15 : 1.65
+	);
+	// Broad stratocumulus decks need enough independent thermals to overlap into
+	// a field. The convective 8x8 cap turns large decks into a sparse set of
+	// isolated, feature-scale ellipsoids when their natural grid is much denser.
+	const int maximumGridAxis = this->_parameters.type == CloudType::Stratocumulus
+		? 32
+		: 12;
+	const int gridX = clampedCeilToInt(this->_parameters.size.getX() / spacing, 2, maximumGridAxis);
+	const int gridZ = clampedCeilToInt(this->_parameters.size.getZ() / spacing, 2, maximumGridAxis);
 	const double cellX = this->_parameters.size.getX() * 0.76 / static_cast<double>(gridX);
 	const double cellZ = this->_parameters.size.getZ() * 0.76 / static_cast<double>(gridZ);
 	const double startX = this->_parameters.position.getX() - 0.38 * this->_parameters.size.getX() + 0.5 * cellX;
@@ -570,18 +613,31 @@ void CloudVolume::buildConvectiveLobes(void)
 				directionY,
 				std::sin(azimuth) * radial
 			);
+			// Keep secondary cells embedded in their parent. Placing their centers on
+			// the exact ellipsoid boundary made the construction read as a necklace of
+			// pasted-on spheres instead of one turbulent condensation surface.
 			const double childRadius = minimumParentRadius * (
-				0.22 + detail * (0.12 + 0.09 * randomValue(childIndex, 0xa73c1u))
+				0.22 + detail * (0.10 + 0.10 * randomValue(childIndex, 0xa73c1u))
 			);
-			const double shell = 0.96 + 0.10 * randomValue(childIndex, 0x61df3u);
+			const double shellSurface = 1.06
+				+ 0.06 * randomValue(childIndex, 0x61df3u);
+			auto shellOffset = [childRadius, shellSurface](double parentExtent) {
+				// Target a small, consistent protrusion on every axis. A single scale
+				// embeds children too deeply along the broad axis of an anvil, but puts
+				// them completely outside a near-spherical parent.
+				return (std::max(
+					parentExtent * 0.62,
+					parentExtent * shellSurface - childRadius
+				));
+			};
 			const Vector3 childCenter = center + Vector3(
-				outward.getX() * parentRadius.getX() * shell,
-				outward.getY() * parentRadius.getY() * shell,
-				outward.getZ() * parentRadius.getZ() * shell
+				outward.getX() * shellOffset(parentRadius.getX()),
+				outward.getY() * shellOffset(parentRadius.getY()),
+				outward.getZ() * shellOffset(parentRadius.getZ())
 			);
 			const Vector3 childRadii(
 				childRadius * (0.88 + 0.18 * randomValue(childIndex, 0x1d4abu)),
-				childRadius * (0.76 + 0.22 * randomValue(childIndex, 0xc81e7u)),
+				childRadius * (0.86 + 0.18 * randomValue(childIndex, 0xc81e7u)),
 				childRadius * (0.88 + 0.18 * randomValue(childIndex, 0x4a29fu))
 			);
 			appendLobe(childCenter, childRadii, 1.0);
@@ -677,7 +733,9 @@ void CloudVolume::buildConvectiveLobes(void)
 			});
 		}
 	}
-	const double formationThreshold = 0.54 - 0.34 * this->_parameters.coverage;
+	const double formationThreshold = this->_parameters.type == CloudType::Stratocumulus
+		? std::clamp(1.0 - this->_parameters.coverage, 0.16, 0.68)
+		: 0.54 - 0.34 * this->_parameters.coverage;
 	const double shearAngle = TWO_PI * randomValue(0u, 0x6f2a1u);
 	Vector3 shearDirection(
 		this->_parameters.shearDirection.getX(),
@@ -690,6 +748,12 @@ void CloudVolume::buildConvectiveLobes(void)
 		shearDirection = Utilities::normalize(shearDirection);
 	const double shearDistance = feature * this->_parameters.towering
 		* (0.18 + this->_parameters.overhang * (1.1 + 1.8 * randomValue(0u, 0xac731u)));
+	// A dense stratocumulus tiling gets its breakup from the displaced metaball
+	// field. Shelling every shallow cell is both redundant and disproportionately
+	// expensive; sparse convective towers retain the multiscale shell.
+	const bool useCauliflowerShell = this->_parameters.fineDetail > 0.45
+		&& this->_parameters.type != CloudType::Stratocumulus;
+	const bool useLegacyChildren = this->_parameters.fineDetail <= 0.45;
 
 	// A connected primary plume gives the formation a readable macro silhouette.
 	// The weather columns below remain as shorter supporting cells and a flat base.
@@ -727,7 +791,12 @@ void CloudVolume::buildConvectiveLobes(void)
 		const double neck = 1.0 - 0.12 * this->_parameters.dominance * middle;
 		const double trunkBulge = 1.0 + 0.18 * this->_parameters.dominance
 			* smoothstep(0.08, 0.32, t) * (1.0 - smoothstep(0.62, 0.80, t));
-		const double crown = this->_parameters.overhang * smoothstep(0.62, 0.96, t);
+		// Localize the broad crown below the final cell. A monotonic envelope made
+		// every upper level an oblate disk; tapering it back to zero leaves a broad
+		// anvil/congestus shelf with a rounded overshooting top.
+		const double crown = this->_parameters.overhang
+			* smoothstep(0.76, 0.90, t)
+			* (1.0 - smoothstep(0.94, 1.0, t));
 		const double radiusBase = feature
 			* (1.02 + 0.24 * randomValue(index, 0xd872fu))
 			* (0.82 + 0.34 * this->_parameters.dominance)
@@ -739,15 +808,44 @@ void CloudVolume::buildConvectiveLobes(void)
 			crownMacroScale,
 			smoothstep(0.62, 0.96, t)
 		);
-		const double horizontalRadius = radiusBase * levelMacroScale * (1.0 + 1.18 * crown);
-		const double verticalRadius = radiusBase * (
-			0.72 + 0.16 * randomValue(index, 0x621f3u)
-			+ 0.05 * clamp01(macroScale - 1.0)
+		// macro_scale controls the coherent formation, not the radius of every
+		// implicit primitive. Let the overlapping shoulders carry most of that
+		// width; otherwise high macro scales expose a stack of giant ellipsoids.
+		const double horizontalMacroScale = 1.0 + 0.34 * (levelMacroScale - 1.0);
+		const double verticalMacroScale = 1.0 + 0.48 * (levelMacroScale - 1.0);
+		// A true anvil may spread strongly; ordinary cumulus overhang should remain
+		// a rounded cauliflower cap rather than acquiring the same disk aspect.
+		const double crownExpansion = this->_parameters.type == CloudType::Cumulonimbus
+			? 0.42
+			: 0.20;
+		double horizontalRadius = radiusBase * horizontalMacroScale
+			* (1.0 + crownExpansion * crown);
+		if (this->_parameters.type == CloudType::Stratocumulus)
+			horizontalRadius = std::min(horizontalRadius, 1.08 * std::min(cellX, cellZ));
+		double verticalRadius = radiusBase * verticalMacroScale * (
+			0.82 + 0.12 * randomValue(index, 0x621f3u)
 		);
-		const double y = this->_minimum.getY() + feature * 0.18 + t * std::max(
-			0.0,
-			heroHeight - verticalRadius - feature * 0.18
-		);
+		double y;
+		if (this->_parameters.type == CloudType::Stratocumulus)
+		{
+			// A shallow layer's nominal height can be smaller than its feature-scale
+			// radii. Keep all three hero levels inside that vertical interval instead
+			// of collapsing them onto the same center and clipping one giant disk.
+			verticalRadius = std::min(verticalRadius, heroHeight * 0.44);
+			const double edgeInset = verticalRadius;
+			y = this->_minimum.getY() + lerp(
+				edgeInset,
+				std::max(edgeInset, heroHeight - edgeInset),
+				t
+			);
+		}
+		else
+		{
+			y = this->_minimum.getY() + feature * 0.18 + t * std::max(
+				0.0,
+				heroHeight - verticalRadius - feature * 0.18
+			);
+		}
 		const Vector3 shear = shearDirection * (shearDistance * t * t);
 		const Vector3 center(
 			heroBaseX + heroWander.getX() + shear.getX(),
@@ -759,7 +857,7 @@ void CloudVolume::buildConvectiveLobes(void)
 			Vector3(horizontalRadius, verticalRadius, horizontalRadius),
 			1.0 - 0.18 * smoothstep(0.70, 1.0, t)
 		);
-		if (level > 0)
+		if (level > 0 && useCauliflowerShell)
 		{
 			appendCauliflowerShell(
 				center,
@@ -768,6 +866,52 @@ void CloudVolume::buildConvectiveLobes(void)
 				0.52 + 0.48 * smoothstep(0.16, 0.72, t),
 				smoothstep(0.45, 0.92, t)
 			);
+		}
+		if (
+			this->_parameters.type == CloudType::Cumulonimbus
+			&& crown > 0.06
+		)
+		{
+			// Build the anvil from overlapping rounded cells rather than stretching
+			// the primary plume into one analytic disk. The asymmetric reach follows
+			// the shear while the crown envelope leaves the overshooting top round.
+			const double baseAnvilRadius = radiusBase * (0.68 + 0.16 * crown);
+			const double spreadSteps[6] = {-3.55, -2.70, -1.85, -1.00, 1.00, 2.00};
+			for (int cell = 0; cell < 6; cell++)
+			{
+				const std::uint32_t cellIndex = index * 5u
+					+ static_cast<std::uint32_t>(cell) + 0x317u;
+				const double anvilRadius = baseAnvilRadius * (
+					0.90 + 0.18 * randomValue(cellIndex, 0x93d71u)
+				);
+				const Vector3 lateral = shearDirection * (
+					spreadSteps[cell] * horizontalRadius * (0.55 + 0.45 * crown)
+				);
+				const double anvilY = this->_minimum.getY() + heroHeight * (
+					0.78 + 0.08 * smoothstep(0.76, 0.94, t)
+				) + anvilRadius * 0.10 * (randomValue(cellIndex, 0x71c2bu) - 0.5);
+				const Vector3 anvilCenter(
+					center.getX() + lateral.getX(),
+					anvilY,
+					center.getZ() + lateral.getZ()
+				);
+				const Vector3 anvilRadii(
+					anvilRadius * (1.26 + 0.16 * randomValue(cellIndex, 0x9ad31u)),
+					anvilRadius * (0.72 + 0.08 * randomValue(cellIndex, 0x7ce2bu)),
+					anvilRadius * (0.96 + 0.12 * randomValue(cellIndex, 0x4fae3u))
+				);
+				appendLobe(anvilCenter, anvilRadii, 0.94);
+				if (useCauliflowerShell)
+				{
+					appendCauliflowerShell(
+						anvilCenter,
+						anvilRadii,
+						cellIndex ^ 0xa173u,
+						0.24 + 0.18 * crown,
+						0.72
+					);
+				}
+			}
 		}
 		// Coalesced neighboring updrafts broaden the congestus body without
 		// inflating feature_scale (which would erase cauliflower detail).
@@ -804,7 +948,10 @@ void CloudVolume::buildConvectiveLobes(void)
 			}
 		}
 
-		if (level == 0)
+		// The Fibonacci shell above is the irregular multiscale boundary model.
+		// The older azimuthal child loop below is retained only as the low-detail
+		// fallback; running both produces visible rings of bead-like spheres.
+		if (level == 0 || !useLegacyChildren)
 			continue;
 		const int childCount = this->_parameters.puffiness >= 0.84
 			? (t >= 0.58 ? 9 : 6)
@@ -921,6 +1068,22 @@ void CloudVolume::buildConvectiveLobes(void)
 					thermal.strength * std::exp(-(dx * dx + dz * dz) / (2.0 * thermal.radius * thermal.radius))
 				);
 			}
+			if (this->_parameters.type == CloudType::Stratocumulus)
+			{
+				// A shallow deck is organized by a continuous weather field, not a few
+				// isolated convective updrafts. Use it only to select neighboring lobe
+				// cells; density evaluation remains on the accelerated lobe path.
+				const double weather = this->fbm(
+					Vector3(
+						static_cast<double>(x) * 0.22,
+						static_cast<double>(this->_parameters.seed) * 0.0017 + 9.3,
+						static_cast<double>(z) * 0.22
+					),
+					3,
+					0x62c93d1u
+				);
+				formation = 0.74 * weather + 0.26 * formation;
+			}
 			formation = clamp01(formation + 0.10 * (randomValue(column, 0x11a53u) - 0.5));
 			if (formation < formationThreshold)
 				continue;
@@ -937,10 +1100,16 @@ void CloudVolume::buildConvectiveLobes(void)
 				* (1.0 - 0.52 * this->_parameters.dominance)
 				* (1.0 - 0.18 * heroWeight * this->_parameters.dominance);
 
-			const double baseX = startX + static_cast<double>(x) * cellX
-				+ (randomValue(column, 0x72e31u) - 0.5) * cellX * 0.58;
+			const double deckStagger = this->_parameters.type == CloudType::Stratocumulus
+				? (z % 2 == 0 ? -0.20 : 0.20) * cellX
+				: 0.0;
+			const double cellJitter = this->_parameters.type == CloudType::Stratocumulus
+				? 0.82
+				: 0.58;
+			const double baseX = startX + static_cast<double>(x) * cellX + deckStagger
+				+ (randomValue(column, 0x72e31u) - 0.5) * cellX * cellJitter;
 			const double baseZ = startZ + static_cast<double>(z) * cellZ
-				+ (randomValue(column, 0x93c47u) - 0.5) * cellZ * 0.58;
+				+ (randomValue(column, 0x93c47u) - 0.5) * cellZ * cellJitter;
 			const double centerDistanceX = (baseX - this->_parameters.position.getX()) / (0.5 * this->_parameters.size.getX());
 			const double centerDistanceZ = (baseZ - this->_parameters.position.getZ()) / (0.5 * this->_parameters.size.getZ());
 			const double centerBias = std::max(0.55, 1.0 - 0.32 * std::sqrt(
@@ -960,13 +1129,27 @@ void CloudVolume::buildConvectiveLobes(void)
 			{
 				const double t = levels > 1 ? static_cast<double>(level) / static_cast<double>(levels - 1) : 0.0;
 				const std::uint32_t index = column * 16u + static_cast<std::uint32_t>(level);
-				const double radiusBase = feature * (
+				double radiusBase = feature * (
 					1.12 - 0.38 * t + 0.42 * randomValue(index, 0xd872fu)
 				);
+				// Neighboring columns should overlap into an irregular field. Bound each
+				// primitive by the actual grid pitch so a large feature scale cannot turn
+				// one support cell into the dominant visible disk.
+				const double gridRadius = (
+					this->_parameters.type == CloudType::Stratocumulus ? 1.08 : 0.76
+				) * std::min(cellX, cellZ);
+				const double gridVariation = this->_parameters.type == CloudType::Stratocumulus
+					? 0.72 + 0.28 * randomValue(index, 0x5f73du)
+					: 1.0;
+				radiusBase = std::min(radiusBase, gridRadius * gridVariation);
 				const double crown = this->_parameters.overhang
-					* smoothstep(0.58, 1.0, t)
+					* smoothstep(0.68, 0.84, t)
+					* (1.0 - smoothstep(0.88, 0.96, t))
 					* smoothstep(0.42, 0.88, heightFormation);
-				const double horizontalRadius = radiusBase * (1.0 + 1.15 * crown);
+				const double crownExpansion = this->_parameters.type == CloudType::Cumulonimbus
+					? 0.72
+					: 0.20;
+				const double horizontalRadius = radiusBase * (1.0 + crownExpansion * crown);
 				if (level > 0)
 				{
 					wander += Vector3(
@@ -976,18 +1159,34 @@ void CloudVolume::buildConvectiveLobes(void)
 					);
 				}
 				const double verticalScale = level == 0
-					? 0.42
-					: (this->_parameters.type == CloudType::Stratocumulus ? 0.58 : 0.88);
-				const double verticalRadius = radiusBase * verticalScale;
-				const double y = this->_minimum.getY() + feature * 0.20 + t * std::max(
-					0.0,
-					columnHeight - verticalRadius - feature * 0.20
-				);
+					? 0.78
+					: (this->_parameters.type == CloudType::Stratocumulus ? 0.78 : 0.94);
+				double verticalRadius = radiusBase * verticalScale;
+				double y;
+				if (this->_parameters.type == CloudType::Stratocumulus)
+				{
+					// Two shallow-layer levels must occupy different heights and overlap;
+					// feature-scale radii larger than the column made both centers collapse.
+					verticalRadius = std::min(verticalRadius, columnHeight * 0.44);
+					const double edgeInset = verticalRadius;
+					y = this->_minimum.getY() + lerp(
+						edgeInset,
+						std::max(edgeInset, columnHeight - edgeInset),
+						t
+					);
+				}
+				else
+				{
+					y = this->_minimum.getY() + feature * 0.20 + t * std::max(
+						0.0,
+						columnHeight - verticalRadius - feature * 0.20
+					);
+				}
 				const Vector3 shear = shearDirection * (shearDistance * t * t);
 				const Vector3 center(baseX + wander.getX() + shear.getX(), y, baseZ + wander.getZ() + shear.getZ());
-				const Vector3 parentRadii(horizontalRadius, radiusBase * verticalScale, horizontalRadius);
+				const Vector3 parentRadii(horizontalRadius, verticalRadius, horizontalRadius);
 				appendLobe(center, parentRadii, 1.0);
-				if (level > 0 && this->_parameters.fineDetail > 0.45)
+				if (level > 0 && useCauliflowerShell)
 				{
 					appendCauliflowerShell(
 						center,
@@ -998,7 +1197,7 @@ void CloudVolume::buildConvectiveLobes(void)
 					);
 				}
 
-				if (level == 0)
+				if (level == 0 || !useLegacyChildren)
 					continue;
 				const int childCount = this->_parameters.puffiness > 0.72 ? 2 : 1;
 				for (int child = 0; child < childCount; child++)
@@ -1094,8 +1293,10 @@ void CloudVolume::buildLobeGrid(void)
 		// densityAt warps lookup positions near the boundary. Inflate occupancy by
 		// the maximum warp so an empty cell remains a conservative zero-majorant
 		// region for delta tracking.
-		const double padding = this->_parameters.featureScale
-			* (0.035 + 0.14 * this->_parameters.erosion);
+		const double padding = this->_parameters.featureScale * (
+			0.16 + 0.12 * this->_parameters.fineDetail
+				+ 0.18 * this->_parameters.erosion
+		);
 		const int minX = coordinate(lobe.center.getX() - lobe.radius.getX() - padding, this->_minimum.getX(), this->_parameters.size.getX(), this->_lobeGridX);
 		const int maxX = coordinate(lobe.center.getX() + lobe.radius.getX() + padding, this->_minimum.getX(), this->_parameters.size.getX(), this->_lobeGridX);
 		const int minY = coordinate(lobe.center.getY() - lobe.radius.getY() - padding, this->_minimum.getY(), this->_parameters.size.getY(), this->_lobeGridY);
@@ -1134,7 +1335,7 @@ double CloudVolume::convectiveLobeField(const Vector3& position) const
 	const int y = coordinate(position.getY(), this->_minimum.getY(), this->_parameters.size.getY(), this->_lobeGridY);
 	const int z = coordinate(position.getZ(), this->_minimum.getZ(), this->_parameters.size.getZ(), this->_lobeGridZ);
 	const std::size_t gridIndex = static_cast<std::size_t>((z * this->_lobeGridY + y) * this->_lobeGridX + x);
-	double fourthPowerEnergy = 0.0;
+	double cubicEnergy = 0.0;
 	const double denseCore = lerp(0.52, 0.72, this->_parameters.puffiness);
 	for (const std::uint32_t lobeIndex : this->_lobeGrid[gridIndex])
 	{
@@ -1148,16 +1349,15 @@ double CloudVolume::convectiveLobeField(const Vector3& position) const
 		const double contribution = lobe.strength * (
 			1.0 - smoothstep(denseCore, 1.0, std::sqrt(distanceSquared))
 		);
-		// A fourth-power soft union rounds the neck between connected cells but
-		// stays close to max-union at exposed boundaries. The earlier quadratic
-		// sum over-inflated every overlap; an exact max made small cells read as
-		// pasted-on spheres.
-		const double squared = contribution * contribution;
-		fourthPowerEnergy += squared * squared;
-		if (fourthPowerEnergy >= 1.0)
+		// A cubic metaball union gives overlapping cells a continuous neck while
+		// avoiding the broad inflation of a quadratic sum. The small iso threshold
+		// below also keeps the compact ellipsoid support from becoming the rendered
+		// silhouette verbatim.
+		cubicEnergy += contribution * contribution * contribution;
+		if (cubicEnergy >= 1.0)
 			return (1.0);
 	}
-	return (clamp01(std::sqrt(std::sqrt(fourthPowerEnergy))));
+	return (clamp01(std::cbrt(cubicEnergy)));
 }
 
 double CloudVolume::densityAt(const Vector3& position) const
@@ -1182,19 +1382,77 @@ double CloudVolume::densityAt(const Vector3& position) const
 	if (!this->_lobes.empty())
 	{
 		const Vector3 warpPosition(
-			advected.getX() / (featureScale * 0.62),
-			advected.getY() / (featureScale * 0.62),
-			advected.getZ() / (featureScale * 0.62)
+			advected.getX() / (featureScale * 1.05),
+			advected.getY() / (featureScale * 1.05),
+			advected.getZ() / (featureScale * 1.05)
 		);
-		const double warpAmplitude = featureScale * (0.035 + 0.14 * this->_parameters.erosion);
+		// The lobe union is a macro envelope, not a collection of visible analytic
+		// ellipsoids. A feature-scale displacement gives its boundary the broad,
+		// coherent breakup seen in real convection before the finer erosion pass.
+		const double warpAmplitude = featureScale * (
+			0.16 + 0.12 * this->_parameters.fineDetail
+				+ 0.18 * this->_parameters.erosion
+		);
+		const double warpX = this->gradientNoise(warpPosition, 0x8193abu);
+		const double warpY = this->gradientNoise(
+			warpPosition + Vector3(17.1, -3.7, 9.2),
+			0x4d12efu
+		);
+		const double warpZ = this->gradientNoise(
+			warpPosition + Vector3(-8.3, 14.6, 5.1),
+			0xb7315u
+		);
 		const Vector3 warped = advected + Vector3(
-			(this->gradientNoise(warpPosition, 0x8193abu) - 0.5) * warpAmplitude,
-			(this->gradientNoise(warpPosition + Vector3(17.1, -3.7, 9.2), 0x4d12efu) - 0.5) * warpAmplitude * 0.72,
-			(this->gradientNoise(warpPosition + Vector3(-8.3, 14.6, 5.1), 0xb7315u) - 0.5) * warpAmplitude
+			(warpX - 0.5) * warpAmplitude,
+			(warpY - 0.5) * warpAmplitude * 0.72,
+			(warpZ - 0.5) * warpAmplitude
 		);
+		const bool shallowDeck = this->_parameters.type == CloudType::Stratocumulus;
+		const Vector3 shapePosition = shallowDeck
+			? Vector3(
+				basePosition.getX() * 0.38 + 8.7,
+				static_cast<double>(this->_parameters.seed) * 0.0019 - 15.3,
+				basePosition.getZ() * 0.38 + 4.1
+			)
+			: Vector3(
+				basePosition.getX() * 0.82 + 8.7,
+				basePosition.getY() * 0.74 - 15.3,
+				basePosition.getZ() * 0.82 + 4.1
+			);
+		const double shapeNoise = this->fbm(
+			shapePosition,
+			shallowDeck ? 3 : 2,
+			0x93a4d71bu
+		);
+		const double shapeBillow = 1.0 - std::fabs(2.0 * shapeNoise - 1.0);
+		const double shapeSignal = 0.72 * shapeNoise + 0.28 * shapeBillow;
+		double boundarySignal = shapeSignal;
 		double density = this->convectiveLobeField(warped);
 		density *= smoothstep(0.0, 0.022, height);
 		density *= 1.0 - smoothstep(0.97, 1.0, height);
+		if (shallowDeck)
+		{
+			// Intersect the overlapping shallow cells with a coherent, spatially
+			// varying condensation top. Without this mask their clipped ellipsoid
+			// caps remain visible as a regular row when viewed near the horizon.
+			const double deckDetail = this->fbm(
+				Vector3(
+					basePosition.getX() * 1.34 - 3.1,
+					static_cast<double>(this->_parameters.seed) * 0.0023 + 6.7,
+					basePosition.getZ() * 1.34 + 11.9
+				),
+				3,
+				0x51a7ce3u
+			);
+			const double deckBillow = 1.0 - std::fabs(2.0 * deckDetail - 1.0);
+			const double deckSignal = 0.48 * shapeSignal
+				+ 0.36 * deckDetail + 0.16 * deckBillow;
+			boundarySignal = deckSignal;
+			const double localTop = 0.10 + 0.06 * this->_parameters.coverage
+				+ 0.40 * this->_parameters.towering * (0.12 + 0.88 * deckSignal)
+				+ 0.035 * this->_parameters.fineDetail * (2.0 * deckDetail - 1.0);
+			density *= 1.0 - smoothstep(localTop - 0.075, localTop, height);
+		}
 		if (density <= 0.0)
 			return (0.0);
 
@@ -1207,7 +1465,12 @@ double CloudVolume::densityAt(const Vector3& position) const
 		const double detailNoise = this->fbm(detailPosition, this->_parameters.detailOctaves, 0x51ed270bu);
 		const double billow = 1.0 - std::fabs(2.0 * detailNoise - 1.0);
 		const double erosionSignal = 0.62 * detailNoise + 0.38 * billow;
-		const double edgeWeight = 1.0 - smoothstep(0.18, 0.58, density);
+		const double edgeWeight = 1.0 - smoothstep(0.34, 0.80, density);
+		// Shift the broad boundary inward with mesostructure at roughly the lobe
+		// scale. This is deliberately independent of the fine erosion control:
+		// even a clean cloud must not reveal its construction ellipsoids.
+		density -= edgeWeight * (0.08 + 0.28 * this->_parameters.fineDetail)
+			* (0.18 + 0.82 * (1.0 - boundarySignal));
 		density -= this->_parameters.erosion * this->_parameters.detail
 			* edgeWeight * (1.0 - erosionSignal) * 0.46;
 		// Real cumulus interiors are optically smooth and dense. Restrict the
@@ -1258,11 +1521,21 @@ double CloudVolume::densityAt(const Vector3& position) const
 	const double threshold = 1.0 - this->_parameters.coverage;
 	const double coverageWidth = std::max(0.045, this->_parameters.coverage * 0.24);
 	const double coverageMask = smoothstep(threshold - 0.075, threshold + coverageWidth, carrier);
-	const double baseNoise = this->fbm(basePosition, 3, 0x13579bdu);
-	const double puffs = this->cellularPuffs(advected, featureScale * 0.78, 0x4f1bbcddu);
-	double structure = lerp(baseNoise, std::max(puffs, baseNoise * 0.72), this->_parameters.puffiness);
-	if (this->_parameters.type == CloudType::Cirrus)
-		structure = carrier;
+	double structure = carrier;
+	if (this->_parameters.type != CloudType::Cirrus)
+	{
+		const double baseNoise = this->fbm(basePosition, 3, 0x13579bdu);
+		const double puffs = this->cellularPuffs(
+			advected,
+			featureScale * 0.78,
+			0x4f1bbcddu
+		);
+		structure = lerp(
+			baseNoise,
+			std::max(puffs, baseNoise * 0.72),
+			this->_parameters.puffiness
+		);
+	}
 	double density = coverageMask * structure;
 	density *= this->verticalProfile(height, growthNoise, coverageMask);
 	if (density <= 0.0)
@@ -1326,6 +1599,79 @@ Color CloudVolume::singleScatteringCoefficientAt(
 	return (this->_parameters.albedo * (extinction * phase));
 }
 
+void CloudVolume::lobeGridCell(
+	const Ray& ray,
+	double t,
+	double exitT,
+	double boundaryEpsilonT,
+	bool& occupied,
+	double& cellExitT
+) const
+{
+	if (this->_lobeGrid.empty())
+	{
+		occupied = true;
+		cellExitT = exitT;
+		return;
+	}
+	const double probeT = std::min(exitT, t + boundaryEpsilonT);
+	// densityAt evaluates the lobe field in position + offset space before
+	// applying its bounded noise warp. The grid already pads every lobe by the
+	// maximum warp, so traversing that same translated field space preserves
+	// empty-cell skipping without discarding shifted density.
+	const Vector3 fieldOrigin = ray.getOrigin() + this->_parameters.offset;
+	const Vector3 point = fieldOrigin + ray.getDirection() * probeT;
+	auto coordinate = [](double value, double minimum, double extent, int count) {
+		return (std::clamp(
+			static_cast<int>(std::floor((value - minimum) / extent * static_cast<double>(count))),
+			0,
+			count - 1
+		));
+	};
+	const int x = coordinate(point.getX(), this->_minimum.getX(), this->_parameters.size.getX(), this->_lobeGridX);
+	const int y = coordinate(point.getY(), this->_minimum.getY(), this->_parameters.size.getY(), this->_lobeGridY);
+	const int z = coordinate(point.getZ(), this->_minimum.getZ(), this->_parameters.size.getZ(), this->_lobeGridZ);
+	const std::size_t gridIndex = static_cast<std::size_t>(
+		(z * this->_lobeGridY + y) * this->_lobeGridX + x
+	);
+	occupied = !this->_lobeGrid[gridIndex].empty();
+	const int coordinates[3] = {x, y, z};
+	const int counts[3] = {this->_lobeGridX, this->_lobeGridY, this->_lobeGridZ};
+	cellExitT = exitT;
+	for (int axis = 0; axis < 3; axis++)
+	{
+		const double direction = ray.getDirection()[axis];
+		if (std::fabs(direction) <= CLOUD_EPSILON)
+			continue;
+		const double cellExtent = this->_parameters.size[axis]
+			/ static_cast<double>(counts[axis]);
+		double boundary;
+		if (point[axis] < this->_minimum[axis])
+		{
+			if (direction < 0.0)
+				continue;
+			boundary = this->_minimum[axis];
+		}
+		else if (point[axis] > this->_maximum[axis])
+		{
+			if (direction > 0.0)
+				continue;
+			boundary = this->_maximum[axis];
+		}
+		else
+		{
+			boundary = this->_minimum[axis] + cellExtent * (
+				direction > 0.0
+					? static_cast<double>(coordinates[axis] + 1)
+					: static_cast<double>(coordinates[axis])
+			);
+		}
+		const double boundaryT = (boundary - fieldOrigin[axis]) / direction;
+		if (boundaryT > t + boundaryEpsilonT * 0.25)
+			cellExitT = std::min(cellExitT, boundaryT);
+	}
+}
+
 bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& hitT) const
 {
 	double entryT;
@@ -1351,58 +1697,11 @@ bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& 
 		1e-10,
 		this->_parameters.featureScale * 1e-7 / rayLength
 	);
-	auto currentLobeCell = [this, &ray, boundaryEpsilonT, exitT](
-		double t,
-		bool& occupied,
-		double& cellExitT
-	) {
-		if (this->_lobeGrid.empty())
-		{
-			occupied = true;
-			cellExitT = exitT;
-			return;
-		}
-		const double probeT = std::min(exitT, t + boundaryEpsilonT);
-		const Vector3 point = ray.pointAtRay(probeT);
-		auto coordinate = [](double value, double minimum, double extent, int count) {
-			return (std::clamp(
-				static_cast<int>(std::floor((value - minimum) / extent * static_cast<double>(count))),
-				0,
-				count - 1
-			));
-		};
-		const int x = coordinate(point.getX(), this->_minimum.getX(), this->_parameters.size.getX(), this->_lobeGridX);
-		const int y = coordinate(point.getY(), this->_minimum.getY(), this->_parameters.size.getY(), this->_lobeGridY);
-		const int z = coordinate(point.getZ(), this->_minimum.getZ(), this->_parameters.size.getZ(), this->_lobeGridZ);
-		const std::size_t gridIndex = static_cast<std::size_t>(
-			(z * this->_lobeGridY + y) * this->_lobeGridX + x
-		);
-		occupied = !this->_lobeGrid[gridIndex].empty();
-		const int coordinates[3] = {x, y, z};
-		const int counts[3] = {this->_lobeGridX, this->_lobeGridY, this->_lobeGridZ};
-		cellExitT = exitT;
-		for (int axis = 0; axis < 3; axis++)
-		{
-			const double direction = ray.getDirection()[axis];
-			if (std::fabs(direction) <= CLOUD_EPSILON)
-				continue;
-			const double cellExtent = this->_parameters.size[axis]
-				/ static_cast<double>(counts[axis]);
-			const double boundary = this->_minimum[axis] + cellExtent * (
-				direction > 0.0
-					? static_cast<double>(coordinates[axis] + 1)
-					: static_cast<double>(coordinates[axis])
-			);
-			const double boundaryT = (boundary - ray.getOrigin()[axis]) / direction;
-			if (boundaryT > t + boundaryEpsilonT * 0.25)
-				cellExitT = std::min(cellExitT, boundaryT);
-		}
-	};
 	for (std::uint32_t step = 0; ; step++)
 	{
 		bool occupied;
 		double cellExitT;
-		currentLobeCell(currentT, occupied, cellExitT);
+		this->lobeGridCell(ray, currentT, exitT, boundaryEpsilonT, occupied, cellExitT);
 		if (!occupied)
 		{
 			currentT = cellExitT + boundaryEpsilonT;
@@ -1415,7 +1714,7 @@ bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& 
 		// would alias step N with bounce N. Preserving the low five bits also keeps
 		// the free-flight and acceptance dimensions on their progressive sequences.
 		const std::uint32_t tupleHash = mixBits(
-			this->_parameters.seed
+			this->_samplingStream
 			^ mixBits(step + 0x9e3779b9u)
 			^ mixBits(Sampler::currentBounce() + 0x85ebca6bu)
 		);
@@ -1639,15 +1938,40 @@ Color CloudVolume::shadowTransmittance(Ray& ray, double t_min, double t_max) con
 		this->_parameters.multipleScatteringFalloff,
 		static_cast<double>(Sampler::currentBounce())
 	);
+	const double boundaryEpsilonT = std::max(
+		1e-10,
+		this->_parameters.featureScale * 1e-7 / rayLength
+	);
 	double opticalDepth = 0.0;
 
-	for (int step = 0; step < stepCount; step++)
+	for (int step = 0; step < stepCount; )
 	{
 		const double sampleT = entryT + (static_cast<double>(step) + 0.5) * stepT;
+		if (!this->_lobeGrid.empty())
+		{
+			bool occupied;
+			double cellExitT;
+			this->lobeGridCell(ray, sampleT, exitT, boundaryEpsilonT, occupied, cellExitT);
+			if (!occupied)
+			{
+				// Preserve the original global midpoint rule: jump directly to the
+				// first midpoint at or beyond this conservative empty-cell boundary.
+				// This avoids procedural density evaluation without changing samples
+				// in occupied cells or the resulting integral.
+				const int firstStepAfterCell = std::clamp(
+					static_cast<int>(std::ceil((cellExitT - entryT) / stepT - 0.5)),
+					step + 1,
+					stepCount
+				);
+				step = firstStepAfterCell;
+				continue;
+			}
+		}
 		opticalDepth += this->_majorantSceneUnits * depthScale
 			* this->densityAt(ray.pointAtRay(sampleT)) * stepDistance;
 		if (opticalDepth >= 20.0)
 			return (Color(0.0, 0.0, 0.0));
+		step++;
 	}
 	const double transmittance = std::exp(-opticalDepth);
 	return (Color(transmittance, transmittance, transmittance));

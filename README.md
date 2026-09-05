@@ -102,6 +102,24 @@ Use Disney's quarter-resolution field for fast look development and the
 half-resolution field used by the sample for final edge filaments and billow
 detail.
 
+For the denser, final-quality cinematic composition, render:
+
+```sh
+./luz examples/scenes/disney-cloud-dense-core.luz --threads 8
+```
+
+The dense-core scene is deliberately configured with a high sample budget;
+override `--samples` and `--resolution` for faster look development.
+
+For framing and color matched to Disney's published Hyperion cloud plate, use:
+
+```sh
+./luz examples/scenes/disney-cloud-hyperion-match.luz --threads 8
+```
+
+This scene restores the authored grid bounds, uses a 35.5 mm camera gate and a
+sampled cobalt-sky environment, and writes a denoised companion image.
+
 `disney-cloud-hero-closeup.luz` is the practical hero-render configuration: it
 keeps the native dense Disney field and reconstructs low-frequency high-order
 scattering while the path tracer resolves the directional residual. For an
@@ -110,17 +128,48 @@ collision-depth extinction, 64 light bounces, and a 1024-spp budget. It is
 intentionally much slower and noisier until deeply converged.
 
 `disney-cloud-hero-closeup.luz` uses the field's broad native face and a tighter
-50 mm composition to fill a 1440x810 frame with one coherent cauliflower mass,
+45 mm composition to fill a 1440x810 frame with one coherent cauliflower mass,
 deep self-shadow cavities, and a foreground bank that naturally leaves frame.
 Authored-grid rotation remains available as a runtime rigid transform when a
 different view is needed; Luz never resamples the `.luzvol`.
 
-The companion `disney-cloud-backlit.luz`, `disney-cloud-dusk.luz`, and
-`disney-cloud-interior.luz` scenes stress bright rims, low-angle warm light,
-opposite-side structure, and rays that begin inside occupied density. Their
-exposures were checked from scene-linear float TIFF output and the final ACES
-display output, including non-finite values, HDR highlight latitude, display
-clipping, and digital-black shadow counts.
+`disney-cloud-dense-core.luz` retains a 50 mm framing and applies density
+threshold and gamma shaping at render time to emphasize the solid cauliflower
+core without modifying the authored volume asset.
+
+The original Luz golden-hour hero uses the Disney field only as source density;
+its camera, scale, physical atmosphere, lighting, and grade are independent of
+the published plate:
+
+```sh
+./luz examples/scenes/disney-cloud-golden-hero.luz --threads 8
+```
+
+Its slightly raised and rotated sun preserves the low warm rim while giving the
+lee-side lobes a direct-light path. The companion `disney-cloud-backlit.luz`,
+deep-shadow `disney-cloud-dusk.luz`, and `disney-cloud-interior.luz` scenes
+stress bright rims, more severe low-angle occlusion, opposite-side structure,
+and rays that begin inside occupied density. Their exposures were checked from
+scene-linear float TIFF output and the final ACES display output, including
+non-finite values, HDR highlight latitude, display clipping, and digital-black
+shadow counts.
+
+The procedural generalization set exercises independent cloud generators,
+camera heights, and illumination rather than reusing the Disney density field:
+
+```sh
+./luz examples/scenes/procedural-cumulus-daylight.luz --threads 8
+./luz examples/scenes/procedural-cumulonimbus-sunrise.luz --threads 8
+./luz examples/scenes/procedural-stratus-overcast.luz --threads 8
+./luz examples/scenes/procedural-cirrus-twilight.luz --threads 8
+./luz examples/scenes/path-traced-cloudscape.luz --threads 8
+```
+
+Together these cover isolated fair-weather cumulus in full daylight, a sheared
+storm anvil at sunrise, broken marine stratus, high cirrus against an
+environment-lit twilight, and an atmosphere-lit aerial stratocumulus/cumulus
+field. Morphology tests sweep unrelated random seeds and check formation
+envelopes rather than locking the generator to pixel goldens.
 
 Only the optional offline converter needs OpenVDB. The `luz` and `luz_tests`
 targets remain zero-dependency C++20 builds.
@@ -342,9 +391,10 @@ Cloud residuals use deterministic front density, camera opacity, depth, and
 primary-light radiance as edge guides. The opacity is reused from the primary
 cloud integration, allowing sub-threshold wisps to remain in the volume-aware
 filter without an extra march; the sharp deterministic lighting layer is added
-after filtering. Once a pixel has at least 64 samples, its measured mean
-variance also reduces unnecessary wide filtering in already-converged cloud
-detail; lower-spp previews retain the full noise-removal pass.
+after filtering. From 32 to 96 samples, confidence in the measured mean
+variance ramps in smoothly so already-converged cloud detail can retain less
+filtering without introducing a sample-count quality cliff; lower-spp previews
+retain the full noise-removal pass.
 
 ## Scene Files
 

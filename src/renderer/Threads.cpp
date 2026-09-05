@@ -29,7 +29,7 @@ namespace
 	using PrimaryRayClass = Renderer::internal::PrimaryRayClass;
 
 	constexpr unsigned int DENOISE_GUIDE_SAMPLE_COUNT = 4;
-	constexpr unsigned int PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT = 2;
+	constexpr unsigned int PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT = 4;
 	constexpr std::uint32_t VOLUME_GUIDING_STREAM = 0x47554944u;
 
 	double	radicalInverse(std::uint64_t index, std::uint32_t base)

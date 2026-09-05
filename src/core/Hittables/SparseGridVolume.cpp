@@ -20,6 +20,8 @@ namespace
 	constexpr double FEATURE_OPTICAL_DEPTH = 0.4307829160924542; // -log(0.65)
 	constexpr std::uint32_t TRACKING_DIMENSION = 0x5a000000u;
 	constexpr std::uint32_t TRANSMITTANCE_DIMENSION = 0x6b000000u;
+	constexpr std::uint32_t TRACKING_ACCEPTANCE_OFFSET =
+		Sampler::DIM_VOLUME_ACCEPTANCE - Sampler::DIM_VOLUME_DISTANCE;
 	constexpr double GAUSS_POINT_LOW = 0.21132486540518711775;
 	constexpr double GAUSS_POINT_HIGH = 0.78867513459481288225;
 	constexpr std::size_t MAX_DIRECTIONAL_CACHE_POINTS = 16u * 1024u * 1024u;
@@ -79,11 +81,18 @@ namespace
 	{
 		return (Utilities::vectorLengthSquared(left - right) <= 1e-20);
 	}
+
+	std::uint32_t nextSamplingStream(void)
+	{
+		static std::atomic<std::uint32_t> nextStream(1u);
+		return (nextStream.fetch_add(1u, std::memory_order_relaxed));
+	}
 }
 
 SparseGridVolume::SparseGridVolume(const GridVolumeParameters& parameters)
 	: _parameters(parameters), _grid(SparseVolumeGrid::load(parameters.fileName))
 {
+	this->_samplingStream = nextSamplingStream();
 	if (parameters.fileName.empty())
 		throw std::invalid_argument("Grid volume requires a file.");
 	if (!finiteVector(parameters.position) || !finiteVector(parameters.rotationDegrees)
@@ -838,8 +847,14 @@ bool SparseGridVolume::sampleCollision(Ray& ray, double t_min, double t_max, dou
 		if (!std::isfinite(rate) || rate <= 0.0)
 			return (false);
 		const std::uint32_t tupleHash = mixBits(step + 0x9e3779b9u)
-			^ mixBits(Sampler::currentBounce() + 0x85ebca6bu);
-		const std::uint32_t dimension = TRACKING_DIMENSION + ((tupleHash & 0x00ffffffu) << 1u);
+			^ mixBits(Sampler::currentBounce() + 0x85ebca6bu)
+			^ mixBits(this->_samplingStream + 0xc2b2ae35u);
+		// Preserve the sampler's low-five-bit semantic dimension so distance and
+		// acceptance retain their progressive sequences while the high bits give
+		// every medium and null event an independent stream.
+		const std::uint32_t dimension = TRACKING_DIMENSION
+			+ Sampler::DIM_VOLUME_DISTANCE
+			+ ((tupleHash & 0x01ffffffu) << 5u);
 		const double freeFlight = -std::log(std::max(1e-12, 1.0 - Sampler::sample1D(dimension))) / rate;
 		const double collisionT = currentT + freeFlight;
 		if (collisionT >= segment.exitT)
@@ -852,7 +867,8 @@ bool SparseGridVolume::sampleCollision(Ray& ray, double t_min, double t_max, dou
 			traversal.localRay.pointAtRay(currentT)
 		);
 		if (density > 0.0
-			&& Sampler::sample1D(dimension + 1u) < density / static_cast<double>(segment.maximum))
+			&& Sampler::sample1D(dimension + TRACKING_ACCEPTANCE_OFFSET)
+				< density / static_cast<double>(segment.maximum))
 		{
 			hitT = currentT;
 			return (true);
@@ -1044,9 +1060,11 @@ Color SparseGridVolume::shadowTransmittance(Ray& ray, double t_min, double t_max
 					^ static_cast<std::uint32_t>(segment.y) * 0x85ebca6bu
 					^ static_cast<std::uint32_t>(segment.z) * 0xc2b2ae35u
 					^ event
+					^ mixBits(this->_samplingStream + 0x27d4eb2du)
 				);
 				const std::uint32_t dimension = TRANSMITTANCE_DIMENSION
-					+ (coordinateHash & 0x00ffffffu);
+					+ Sampler::DIM_VOLUME_DISTANCE
+					+ ((coordinateHash & 0x01ffffffu) << 5u);
 				const double distance = -std::log(std::max(
 					1e-12,
 					1.0 - Sampler::sample1D(dimension)
