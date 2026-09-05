@@ -1515,6 +1515,14 @@ namespace
 					);
 					if (averageFalloff < 0.999)
 					{
+						// Cloud optical depth describes transport through participating
+						// media only. Solid occluders must also block reconstructed sun
+						// energy, even when direct transmission is already zero.
+						const Color geometricVisibility = geometricShadowTransmittance(
+							scene, position, lightDirection
+						);
+						if (maxChannel(geometricVisibility) <= 1e-8)
+							continue;
 						const double averageAlbedo = std::clamp(
 							Utilities::luminance(bulkScatteringCoefficient)
 							/ bulkExtinctionSum,
@@ -1558,7 +1566,7 @@ namespace
 							0.0,
 							2.0
 						);
-						source += bulkScatteringCoefficient * emitted
+						source += bulkScatteringCoefficient * emitted * geometricVisibility
 							* (ISOTROPIC_PHASE * orderGain * diffuseVisibility * compensation);
 					}
 				}

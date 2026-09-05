@@ -5938,6 +5938,46 @@ namespace
 		);
 	}
 
+	void	testPrimaryCloudSunFillRespectsOpaqueShadows(void)
+	{
+		Renderer::internal::RenderCamera camera;
+		camera.width = camera.height = 1.0;
+		camera.inverseWidth = camera.inverseHeight = 1.0;
+		camera.position = Vector3(0.0, 0.0, 0.0);
+		camera.lowerLeftCorner = Vector3(0.0, 0.0, -1.0);
+		auto radiance = [&camera](bool blocked, double directionalDepth)
+		{
+			Scene scene;
+			scene.setRenderSky(SKY_NONE);
+			scene.setBackgroundColor(Color(0.0, 0.0, 0.0));
+			scene.setMaxLightBounces(0);
+			scene.addHittable(std::make_shared<TestPrimaryDensityVolume>(
+				2.0, 6.0, 0.25, 0.5, 1.0, directionalDepth
+			));
+			scene.addHittable(std::make_shared<DirectionalLight>(
+				Vector3(-1.0, 0.0, 0.0),
+				std::make_shared<Emissive>(Color(1.0, 1.0, 1.0))
+			));
+			if (blocked)
+				scene.addHittable(std::make_shared<Sphere>(
+					Vector3(5.0, 0.0, -4.0), 3.0,
+					std::make_shared<Lambertian>(Color(0.5, 0.5, 0.5))
+				));
+			scene.updateLights();
+			Sampler::beginPixelSample(47, 53, 0);
+			const auto sample = Renderer::internal::_calculatePixelSample(scene, camera, 0, 0, true);
+			Sampler::endPixelSample();
+			return sample.primarySingleScattering;
+		};
+		for (double depth : {-1.0, 0.0, 100.0})
+		{
+			require(Utilities::luminance(radiance(false, depth)) > 0.0,
+				"Unoccluded cloud sunlight fixture produced no energy.");
+			requireColorNear(radiance(true, depth), Color(0.0, 0.0, 0.0),
+				"Opaque geometry leaked sunlight into reconstructed cloud fill.");
+		}
+	}
+
 	void	testPrimaryCloudControlReconstructsEnvironmentEnergy(void)
 	{
 		constexpr double extinction = 0.25;
@@ -7750,6 +7790,7 @@ int	main(void)
 		testAtmosphereMetersPerUnitPreservesPhysicalScale();
 		testAtmospherePrimaryHitCompositesSurface();
 		testPrimaryCloudControlStopsAtCameraSurfaces();
+		testPrimaryCloudSunFillRespectsOpaqueShadows();
 		testPrimaryCloudControlReconstructsEnvironmentEnergy();
 		testSceneDefaultsEnableAdaptiveAndDenoise();
 		testRenderedSceneHasBasicVisualStructure();
