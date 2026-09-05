@@ -35,3 +35,7 @@ objs
 /examples/scenes/disney-cloud.luz
 /examples/scenes/golden-star-bloom.luz
 /examples/scenes/suzanne-instances.luz
+
+# Local render experiments and generated cloud benchmark results.
+/renders/
+/benchmarks/cloud-improvements.csv

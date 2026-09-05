@@ -19,13 +19,8 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - Adaptive sampling
 - Denoiser (NFOR-style)
 - Spheres, planes, rectangles, triangles, cubes, volumes, and OBJ meshes
-- Path-traced heterogeneous procedural clouds with hierarchical hero thermals,
-  multi-scale cauliflower detail, wind-sheared crowns, cloud-bank composition,
-  and cumulus, stratocumulus, stratus, cirrus, and cumulonimbus presets
-- Dependency-free `.luzvol` sparse authored volumes with trilinear sampling,
-  empty-space traversal, local-majorant delta/residual-ratio tracking,
-  bounded-memory swept directional optical-depth caches, and an optional offline
-  VDB converter that is never linked into Luz
+- Procedural clouds with cumulus, stratus, cirrus, and storm presets
+- Imported cloud volumes in the sparse `.luzvol` format (optional VDB converter)
 - Scene-linear ACEScg rendering with sRGB input/output transforms
 - Spectral authoring helpers: wavelength, blackbody, solar, and reflectance curves
 - Lambertian, GGX metal, rough dielectric, layered principled with subsurface
@@ -37,8 +32,7 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - .blend to .luz converter
 - Fully customizable render parameters via CLI or scene file
 - Importance sampling with PDFs, MIS, and optional caustic photon mapping
-- Optional deterministic two-phase volume path guiding with frozen spatial
-  radiance cells and exact learned/physical/sun/sky mixture PDFs
+- Optional volume path guiding
 - BVH acceleration, including packed mesh BVHs with binned SAH construction and near-first traversal
 - Atmospheric simulation w/ scattering
 - Physical camera focal length, sensor size, aperture/f-stop, focus distance,
@@ -78,122 +72,34 @@ The volumetric fog and godrays sample is:
 ./luz --file examples/scenes/volumetric_godrays.luz --threads 8
 ```
 
-The atmospheric procedural-cloud sample is:
-
-```sh
-./luz examples/scenes/path-traced-clouds.luz --threads 8
-```
-
-The high-altitude layered cloudscape sample is:
-
-```sh
-./luz examples/scenes/path-traced-cloudscape.luz --threads 8
-```
-
-The authored Disney hero-cloud sample uses a locally converted asset:
-
-```sh
-tools/build-vdb-converter.sh /tmp/vdb-to-luzvol
-/tmp/vdb-to-luzvol wdas_cloud_half.vdb assets/volumes/wdas_cloud_half.luzvol density
-./luz examples/scenes/disney-cloud-hero-closeup.luz --threads 8
-```
-
-Use Disney's quarter-resolution field for fast look development and the
-half-resolution field used by the sample for final edge filaments and billow
-detail.
-
-For the denser, final-quality cinematic composition, render:
-
-```sh
-./luz examples/scenes/disney-cloud-dense-core.luz --threads 8
-```
-
-The dense-core scene is deliberately configured with a high sample budget;
-override `--samples` and `--resolution` for faster look development.
-
-For framing and color matched to Disney's published Hyperion cloud plate, use:
-
-```sh
-./luz examples/scenes/disney-cloud-hyperion-match.luz --threads 8
-```
-
-This scene restores the authored grid bounds, uses a 35.5 mm camera gate and a
-sampled cobalt-sky environment, and writes a denoised companion image.
-
-`disney-cloud-hero-closeup.luz` is the practical hero-render configuration: it
-keeps the native dense Disney field and reconstructs low-frequency high-order
-scattering while the path tracer resolves the directional residual. For a stochastic
-transport reference, `disney-cloud-reference.luz` enables `volume_reference=1`,
-full collision-depth extinction, 64 light bounces, and a fixed 1024-spp budget
-without denoising. The atmosphere model and finite bounce limit still apply. It is
-intentionally much slower and noisier until deeply converged.
-
-`disney-cloud-hero-closeup.luz` uses the field's broad native face and a tighter
-45 mm composition to fill a 1440x810 frame with one coherent cauliflower mass,
-deep self-shadow cavities, and a foreground bank that naturally leaves frame.
-Authored-grid rotation remains available as a runtime rigid transform when a
-different view is needed; Luz never resamples the `.luzvol`.
-
-`disney-cloud-dense-core.luz` retains a 50 mm framing and applies density
-threshold and gamma shaping at render time to emphasize the solid cauliflower
-core without modifying the authored volume asset.
-
-The original Luz golden-hour hero uses the Disney field only as source density;
-its camera, scale, physical atmosphere, lighting, and grade are independent of
-the published plate:
-
-```sh
-./luz examples/scenes/disney-cloud-golden-hero.luz --threads 8
-```
-
-Its slightly raised and rotated sun preserves the low warm rim while giving the
-lee-side lobes a direct-light path. The companion `disney-cloud-backlit.luz`,
-deep-shadow `disney-cloud-dusk.luz`, and `disney-cloud-interior.luz` scenes
-stress bright rims, more severe low-angle occlusion, opposite-side structure,
-and rays that begin inside occupied density. Their exposures were checked from
-scene-linear float TIFF output and the final ACES display output, including
-non-finite values, HDR highlight latitude, display clipping, and digital-black
-shadow counts.
-
-Procedural clouds also support conservative local tracking bounds, optional sun/sky
-optical-depth caching, independent integration budgets, and spatial weather/base
-variation. `quality` now changes integration accuracy without changing authored
-noise octaves. Existing octave counts can be pinned with `detail_octaves`.
-
-```sh
-./luz examples/scenes/procedural-weather-cumulus.luz --threads 8
-```
-
-Use `volume_reference=1` in `[settings]` to compare against stochastic volume
-transport without directional caches, depth falloff or primary-light replacement.
-See [cloud settings](docs/scene-files.md#procedural-clouds) and the
-[native cloud benchmark](docs/benchmarks.md#native-cloud-matrix).
-
-The procedural generalization set exercises independent cloud generators,
-camera heights, and illumination rather than reusing the Disney density field:
-
-```sh
-./luz examples/scenes/procedural-cumulus-daylight.luz --threads 8
-./luz examples/scenes/procedural-cumulonimbus-sunrise.luz --threads 8
-./luz examples/scenes/procedural-stratus-overcast.luz --threads 8
-./luz examples/scenes/procedural-cirrus-twilight.luz --threads 8
-./luz examples/scenes/path-traced-cloudscape.luz --threads 8
-```
-
-Together these cover isolated fair-weather cumulus in full daylight, a sheared
-storm anvil at sunrise, broken marine stratus, high cirrus against an
-environment-lit twilight, and an atmosphere-lit aerial stratocumulus/cumulus
-field. Morphology tests sweep unrelated random seeds and check formation
-envelopes rather than locking the generator to pixel goldens.
-
-Only the optional offline converter needs OpenVDB. The `luz` and `luz_tests`
-targets remain zero-dependency C++20 builds.
-
 Run the test suite:
 
 ```sh
 make test
 ```
+
+## Clouds
+
+Render procedural clouds with no extra assets:
+
+```sh
+./luz examples/scenes/procedural-cumulus-daylight.luz --samples 32 --resolution 960x540
+```
+
+More presets and a layered cloudscape are in [`examples/scenes/`](examples/scenes/).
+Use `--samples` and `--resolution` to balance render time and quality.
+
+For the Disney golden-hour hero, first follow the
+[volume import instructions](docs/scene-files.md#authored-sparse-volumes)
+to create `assets/volumes/wdas_cloud_half.luzvol`, then render:
+
+```sh
+./luz examples/scenes/disney-cloud-golden-hero.luz --samples 32 --resolution 960x540
+```
+
+Disney scenes need a separately downloaded dataset. Only the optional VDB
+converter requires OpenVDB; Luz itself has no third-party dependencies.
+See the [cloud reference](docs/scene-files.md#procedural-clouds) for customization.
 
 ## Benchmarking
 
@@ -358,24 +264,10 @@ The complete scene-file reference is in
 
 ## Adaptive Sampling
 
-Adaptive sampling is enabled by default. `--samples` is the maximum samples per
-pixel when adaptive stopping is active. Each pixel uses a progressive per-pixel
-sample sequence, renders at least
-`--adaptive-min-samples`, then periodically checks luminance and RGB confidence
-intervals. `--adaptive-background-min-samples` and
-`--adaptive-volume-min-samples` can move samples from deterministic sky into
-noisy cloud transport; zero keeps the global floor. Primary-ray guides and
-cloud opacity prevent thin wisps from being treated as empty background. Very
-dark surfaces and volumes use a conservative minimum before they can stop, so
-rare light contributions are less likely to be mistaken for converged black.
-Use `--no-adaptive` or `--adaptive false` to render every pixel for the full
-sample count.
-
-Display renders also report encoded-sRGB luminance percentiles and the fraction
-of pixels with a clipped channel after exposure and the view transform. These
-diagnostics make bright-sun, dusk, backlight, and interior exposure regressions
-visible in automated renders; raw scene-linear TIFF output intentionally omits
-them.
+Adaptive sampling is enabled by default: `--samples` sets the maximum samples
+per pixel, and converged pixels stop early. Lower `--adaptive-threshold` for
+more detail, or use `--no-adaptive` to render every pixel at the full sample count.
+See the [scene-file reference](docs/scene-files.md) for advanced settings.
 
 Lower thresholds keep more detail and cost more time. For final renders, start
 with a high max sample count and tune with values like:
@@ -401,15 +293,6 @@ image can look almost unchanged or can smooth the wrong details. Use at least a
 few samples per pixel for previews, and prefer roughly 16+ samples per pixel
 when judging denoiser quality. Very low resolutions also make evaluation
 misleading because each local filter window covers too much of the image.
-
-Cloud residuals use deterministic front density, camera opacity, depth, and
-primary-light radiance as edge guides. The opacity is reused from the primary
-cloud integration, allowing sub-threshold wisps to remain in the volume-aware
-filter without an extra march; the sharp deterministic lighting layer is added
-after filtering. From 32 to 96 samples, confidence in the measured mean
-variance ramps in smoothly so already-converged cloud detail can retain less
-filtering without introducing a sample-count quality cliff; lower-spp previews
-retain the full noise-removal pass.
 
 ## Scene Files
 
