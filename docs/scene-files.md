@@ -170,31 +170,14 @@ linear RGB radiance and converted to ACEScg. HDR values above `1.0` are preserve
 in scene-linear rendering, so they can drive bright reflections, bloom, and
 diffuse illumination.
 
-Paths are resolved like other assets: relative to the scene file, relative to
-the current working directory, then under common asset directories including
-`textures/` and `assets/textures/`. When `sky=environment`, the map is visible
-to camera rays and specular/refraction misses. When `sky=atmosphere` and an
-environment map is loaded, Luz composites the map behind the atmosphere as
-`atmosphere in-scattering + atmosphere transmittance * environment radiance`.
-This allows calibrated HDR horizons, interiors, or space backgrounds to coexist
-with atmospheric scattering.
+Map paths are resolved relative to the scene file, then the working directory
+and common asset directories. `sky=environment` displays the map;
+`sky=atmosphere` displays it behind the atmosphere.
 
-Environment lighting is independent from visibility. With `environment_lighting=1`
-the map is sampled as an infinite light using luminance-weighted solid-angle
-importance sampling and MIS, even when the visible sky is `atmosphere`. Use
-`environment_lighting=0` when the map should be a camera/reflection backdrop
-only. Use at most one of `environment_scale`, `environment_radiance`,
-`environment_luminance`, `environment_irradiance`, or `environment_illuminance`.
-For real HDRI calibration, horizontal illuminance in lux is usually the most
-useful input because it ties the map to measured incident light at the capture
-location.
-
-The procedural atmosphere evaluates its compact Rayleigh/Mie channel model in
-linear sRGB and converts the resulting radiance into Luz's scene-linear ACEScg
-working space. This avoids treating wavelength-sampled scattering coefficients
-as AP1 primaries and losing the red channel during display conversion. Earth
-Rayleigh coefficients use `(5.802,13.558,33.1)e-6 1/m`, matching the production
-model in [A Scalable and Production Ready Sky and Atmosphere Rendering Technique](https://doi.org/10.1111/cgf.14050).
+`environment_lighting=1` also uses the map to illuminate the scene; set it to
+`0` for a backdrop only. Choose one brightness control: `environment_scale`,
+`environment_radiance`, `environment_luminance`, `environment_irradiance`, or
+`environment_illuminance`.
 
 ## Scene
 
@@ -757,16 +740,12 @@ material colors and is treated as chromaticity for physical unit properties;
 zero-luminance colors are rejected. `radiant_intensity` is W/sr for isotropic
 sphere/point emitters; `candela` is lm/sr.
 
-`directional_light` creates an infinite light whose `direction` is the direction
-light travels, suitable for sun lights. When `sky=atmosphere`, the first
-`directional_light` is also the atmosphere sun source: its opposite direction is
-used for scattering rays toward the sun, and its emitted light value sets the
-atmosphere source intensity. With `solar=SCALE`, Luz uses 1361 W/m^2 direct
-solar irradiance for both surfaces and atmosphere scattering. Use
-`atmosphere_sun_scale` only when you need an artistic atmosphere-only
-multiplier.
-If no directional light exists, the first `atmosphere=` value is used as the
-vertical sun-angle fallback with the atmosphere fallback source intensity.
+`directional_light` creates sunlight; `direction` points in the direction light
+travels. With `sky=atmosphere`, the first directional light also controls the
+sky's sun. `solar=1` sets irradiance to 1361 W/m²; `atmosphere_sun_scale` adjusts
+only the atmosphere brightness. Without a directional light, the sun angle
+comes from `atmosphere=`.
+
 `point_light` and `sphere_light` create emissive spheres. These lights are still
 sampled through Luz's emissive-hittable lighting path. Sphere and point lights
 also accept `visible=0` to hide the light surface from camera and shadow rays
