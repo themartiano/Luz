@@ -101,6 +101,30 @@ Disney scenes need a separately downloaded dataset. Only the optional VDB
 converter requires OpenVDB; Luz itself has no third-party dependencies.
 See the [cloud reference](docs/scene-files.md#procedural-clouds) for customization.
 
+## Showcase
+
+#### Stormtroopers shot
+<img width="1920" height="1080" alt="stormtroopers" src="https://github.com/user-attachments/assets/8ccda949-9107-4211-be9d-a0daa55e3dd9" />
+
+##### by @[ScottGraham](https://blendswap.com/profile/120125) on [BlendSwap](https://blendswap.com/blend/13953)
+
+#### Rhetorician statue
+<img width="1920" height="1080" alt="bust-statue" src="https://github.com/user-attachments/assets/3173b5c1-f81f-404a-8740-20635b583e5c" />
+
+##### by @[geoffreymarchal](https://blendswap.com/profile/180520) on [BlendSwap](https://blendswap.com/blend/21704)
+
+#### [Cornell Box](https://en.wikipedia.org/wiki/Cornell_box)
+<img width="1920" height="1920" alt="cornell" src="https://github.com/user-attachments/assets/11d3b842-879e-4e30-b523-bed9678d43d8" />
+
+#### Simulated Earth atmosphere - space view + moon
+<img width="1920" height="1920" alt="atmosphere" src="https://github.com/user-attachments/assets/b918af83-6c9a-4d31-a0f5-e5df7a01f2df" />
+
+#### 10 Million bananas
+<img width="1920" height="1080" alt="bananas" src="https://github.com/user-attachments/assets/976a7675-fe39-469c-ad9f-9d6680336791" />
+
+#### [Ray Tracing in One Weekend](https://github.com/RayTracing/raytracing.github.io) main scene
+<img width="1920" height="1080" alt="rtionw" src="https://github.com/user-attachments/assets/6a215186-6b6a-4bff-b66a-822262e1d4dc" />
+
 ## Benchmarking
 
 Luz includes deterministic benchmarks for render, denoise, post-process, and
@@ -352,22 +376,9 @@ tests/             Standard-library-only test program
 docker/            Benchmark container
 ```
 
-## Showcase
-
-<img width="1920" height="1080" alt="stormtroopers" src="https://github.com/user-attachments/assets/8ccda949-9107-4211-be9d-a0daa55e3dd9" />
-<img width="1920" height="1920" alt="cornell" src="https://github.com/user-attachments/assets/11d3b842-879e-4e30-b523-bed9678d43d8" />
-<img width="1920" height="1920" alt="atmosphere" src="https://github.com/user-attachments/assets/b918af83-6c9a-4d31-a0f5-e5df7a01f2df" />
-<img width="1920" height="1080" alt="rtionw" src="https://github.com/user-attachments/assets/6a215186-6b6a-4bff-b66a-822262e1d4dc" />
-
 ## Personal Note
 
 Special thanks to the [Ray Tracing in One Weekend](https://github.com/RayTracing/raytracing.github.io) book series. It was a great source of inspiration and information during a big part of the development of Luz, specially since those were times before AI.
-
-## Attribution
-
-Stormtrooper Scene by @[ScottGraham](https://blendswap.com/profile/120125) on [BlendSwap](https://blendswap.com/blend/13953).
-
-Bust Statue by @[geoffreymarchal](https://blendswap.com/profile/180520) on [BlendSwap](https://blendswap.com/blend/21704).
 
 ## License
 
