@@ -3,6 +3,8 @@
 #include "Hittables/DensityVolume.hpp"
 #include "Hittables/Hittable.hpp"
 #include <cstdint>
+#include <array>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <vector>
@@ -50,6 +52,13 @@ struct CloudParameters
 	Vector3		offset = Vector3(0.0, 0.0, 0.0);
 	int		detailOctaves = 3;
 	int		maxTrackingSteps = 512;
+	// Zero disables the approximate directional cache. At most four directions,
+	// each with at most 1,048,576 float samples (16 MiB total).
+	double directionalCacheResolution = 0.0;
+	double primaryDetail = 1.0;
+	bool localMajorants = true;
+	double weatherVariation = 0.0;
+	double baseVariation = 0.0;
 	double		metersPerUnit = 1.0;
 };
 
@@ -71,6 +80,7 @@ class CloudVolume : public Hittable, public DensityVolume
 		bool		createBoundingBox(AABB& outputBoundingBox) const override;
 
 		double		densityAt(const Vector3& position) const;
+		double densityMajorantAt(const Vector3& position) const;
 		bool		integrationInterval(
 			const Ray& ray,
 			double t_min,
@@ -84,13 +94,33 @@ class CloudVolume : public Hittable, public DensityVolume
 			const Vector3& incidentDirection,
 			const Vector3& scatteredDirection
 		) const override;
+		Color singleScatteringWithExtinction(
+			const Vector3& position, const Vector3& incidentDirection,
+			const Vector3& scatteredDirection, double extinction
+		) const override;
 		Color		volumeAlbedo(void) const override;
 		double		volumeFeatureScale(void) const override;
 		double		multipleScatteringFalloff(void) const override;
 		double		multipleScatteringCompensation(void) const override;
+		bool directionalOpticalDepth(const Vector3& position, const Vector3& direction,
+			double& opticalDepth) const override;
 		const CloudParameters&	getParameters(void) const;
 
 	private:
+		struct DirectionalTransmittanceCache
+		{
+			Vector3 direction;
+			std::array<std::uint32_t, 3> cells{}, points{};
+			std::vector<float> opticalDepth;
+		};
+		using DirectionalCacheList = std::vector<std::shared_ptr<const DirectionalTransmittanceCache>>;
+		const DirectionalTransmittanceCache* directionalCache(const Vector3& direction) const;
+		std::shared_ptr<const DirectionalTransmittanceCache> buildDirectionalCache(const Vector3& direction) const;
+		double cachedDirectionalOpticalDepth(const DirectionalTransmittanceCache& cache,
+			const Vector3& position) const;
+		mutable std::mutex _directionalCacheMutex;
+		mutable std::shared_ptr<const DirectionalCacheList> _directionalCacheSnapshot;
+
 		struct Lobe
 		{
 			Vector3 center;
@@ -105,7 +135,7 @@ class CloudVolume : public Hittable, public DensityVolume
 			double t,
 			double exitT,
 			double boundaryEpsilonT,
-			bool& occupied,
+			double& densityMajorant,
 			double& cellExitT
 		) const;
 		bool		stableFeatureCollision(
@@ -118,6 +148,7 @@ class CloudVolume : public Hittable, public DensityVolume
 		Vector3		featureNormalAt(const Vector3& position) const;
 		void		buildConvectiveLobes(void);
 		void		buildLobeGrid(void);
+		void buildDensityMajorants(void);
 		double		convectiveLobeField(const Vector3& position) const;
 		double		verticalProfile(double height, double growthNoise, double coverageMask) const;
 		double		cellularPuffs(const Vector3& position, double scale, std::uint32_t salt) const;
@@ -132,6 +163,7 @@ class CloudVolume : public Hittable, public DensityVolume
 		std::shared_ptr<Material>	_phaseFunction;
 		std::vector<Lobe>	_lobes;
 		std::vector<std::vector<std::uint32_t>>	_lobeGrid;
+		std::vector<double> _densityMajorants;
 		int	_lobeGridX = 0;
 		int	_lobeGridY = 0;
 		int	_lobeGridZ = 0;

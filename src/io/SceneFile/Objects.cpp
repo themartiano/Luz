@@ -528,6 +528,8 @@ namespace
 		std::optional<Vector3>	offset;
 		std::optional<int>	detailOctaves;
 		std::optional<int>	maxTrackingSteps;
+		std::optional<double> directionalCacheResolution, primaryDetail, weatherVariation, baseVariation;
+		std::optional<int> localMajorants;
 		std::string	quality;
 	};
 
@@ -549,6 +551,7 @@ namespace
 		std::optional<double> multipleScatteringCompensation;
 		std::optional<int> shadowSamplesPerBrick;
 		std::optional<double> primaryDetail;
+		std::optional<int> directionalCache;
 		std::string quality;
 	};
 
@@ -1520,7 +1523,7 @@ namespace
 					const std::string quality = SceneFile::internal::_lowerCopy(cloud.quality);
 					if (quality == "preview")
 					{
-						if (!cloud.detailOctaves) parameters.detailOctaves = std::min(parameters.detailOctaves, 2);
+						if (!cloud.primaryDetail) parameters.primaryDetail = 0.5;
 						if (!cloud.maxTrackingSteps) parameters.maxTrackingSteps = 128;
 					}
 					else if (quality == "production" || quality == "final")
@@ -1529,11 +1532,21 @@ namespace
 					}
 					else if (quality == "cinematic")
 					{
-						if (!cloud.detailOctaves) parameters.detailOctaves = std::max(parameters.detailOctaves, 4);
+						if (!cloud.primaryDetail) parameters.primaryDetail = 2.0;
 						if (!cloud.maxTrackingSteps) parameters.maxTrackingSteps = 1024;
 					}
 					else
 						throw std::runtime_error("Cloud '" + cloudName + "' quality must be preview, production, or cinematic.");
+				}
+				if (cloud.directionalCacheResolution) parameters.directionalCacheResolution = *cloud.directionalCacheResolution;
+				if (cloud.primaryDetail) parameters.primaryDetail = *cloud.primaryDetail;
+				if (cloud.weatherVariation) parameters.weatherVariation = *cloud.weatherVariation;
+				if (cloud.baseVariation) parameters.baseVariation = *cloud.baseVariation;
+				if (cloud.localMajorants)
+				{
+					if (*cloud.localMajorants != 0 && *cloud.localMajorants != 1)
+						throw std::runtime_error("tracking_majorants must be zero or one.");
+					parameters.localMajorants = *cloud.localMajorants != 0;
 				}
 				parameters.metersPerUnit = scene.getMetersPerUnit();
 				scene.addHittable(std::make_shared<CloudVolume>(parameters));
@@ -1613,6 +1626,16 @@ namespace
 				cloud.detailOctaves = parseCloudInteger(value, cloudName, key);
 			else if (key == "max_steps" || key == "maxsteps" || key == "tracking_steps" || key == "trackingsteps")
 				cloud.maxTrackingSteps = parseCloudInteger(value, cloudName, key);
+			else if (key == "directional_cache_resolution")
+				cloud.directionalCacheResolution = parseCloudDouble(value, cloudName, key);
+			else if (key == "primary_detail")
+				cloud.primaryDetail = parseCloudDouble(value, cloudName, key);
+			else if (key == "weather_variation")
+				cloud.weatherVariation = parseCloudDouble(value, cloudName, key);
+			else if (key == "base_variation")
+				cloud.baseVariation = parseCloudDouble(value, cloudName, key);
+			else if (key == "tracking_majorants")
+				cloud.localMajorants = parseCloudInteger(value, cloudName, key);
 			else if (key == "quality")
 				cloud.quality = value;
 			else
@@ -1697,6 +1720,12 @@ namespace
 					parameters.shadowSamplesPerBrick = *volume.shadowSamplesPerBrick;
 				if (volume.primaryDetail)
 					parameters.primaryDetail = *volume.primaryDetail;
+				if (volume.directionalCache)
+				{
+					if (*volume.directionalCache != 0 && *volume.directionalCache != 1)
+						throw std::runtime_error("directional_cache must be zero or one.");
+					parameters.directionalCache = *volume.directionalCache != 0;
+				}
 				parameters.metersPerUnit = scene.getMetersPerUnit();
 				scene.addHittable(std::make_shared<SparseGridVolume>(parameters));
 				return;
@@ -1740,6 +1769,8 @@ namespace
 				volume.shadowSamplesPerBrick = parseCloudInteger(value, volumeName, key);
 			else if (key == "primary_detail" || key == "primarydetail" || key == "control_detail" || key == "controldetail")
 				volume.primaryDetail = parseCloudDouble(value, volumeName, key);
+			else if (key == "directional_cache")
+				volume.directionalCache = parseCloudInteger(value, volumeName, key);
 			else if (key == "quality")
 				volume.quality = value;
 			else

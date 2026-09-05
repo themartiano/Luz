@@ -1,9 +1,10 @@
-# Physically complete Disney cloud reference render. This intentionally trades
-# speed and convergence for unapproximated collision-depth multiple scattering.
+# Stochastic Disney cloud transport reference. The configured bounce limit and
+# atmosphere model still apply; directional caches and volume reconstruction do not.
 [settings]
+volume_reference=1
 resolution=960,540
 samples=1024
-adaptive=1
+adaptive=0
 adaptiveminsamples=96
 adaptivebackgroundminsamples=16
 adaptivevolumeminsamples=128
@@ -13,7 +14,7 @@ maxlightbounces=64
 view_transform=aces
 exposure=-6.5
 bloom=0
-denoise=1
+denoise=0
 sky=atmosphere
 atmosphere=0.18,6360000,6420000,7994,1200,20,10,0
 atmosphere_sun_scale=0.23

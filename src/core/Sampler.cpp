@@ -25,6 +25,7 @@ namespace
 		bool	featureSampling = false;
 		bool	volumeControlSampling = false;
 		bool	directionalShadowSampling = false;
+		bool referenceVolumeTransport = false;
 		std::uint64_t	baseKey = 0;
 	};
 
@@ -182,6 +183,7 @@ void	Sampler::beginPixelSample(std::size_t x, std::size_t y, std::uint32_t sampl
 	g_context.featureSampling = false;
 	g_context.volumeControlSampling = false;
 	g_context.directionalShadowSampling = false;
+	g_context.referenceVolumeTransport = false;
 	g_context.baseKey = g_renderSeed;
 	g_context.baseKey ^= (static_cast<std::uint64_t>(x) + 1ull) * 0xbf58476d1ce4e5b9ull;
 	g_context.baseKey ^= (static_cast<std::uint64_t>(y) + 1ull) * 0x94d049bb133111ebull;
@@ -345,4 +347,14 @@ Vector3	Sampler::unitDisk(std::uint32_t dimension)
 	}
 
 	return (Vector3(radius * std::cos(theta), radius * std::sin(theta), 0.0));
+}
+
+void Sampler::setReferenceVolumeTransport(bool enabled)
+{
+	g_context.referenceVolumeTransport = enabled;
+}
+
+bool Sampler::isReferenceVolumeTransport(void)
+{
+	return g_context.active && g_context.referenceVolumeTransport;
 }

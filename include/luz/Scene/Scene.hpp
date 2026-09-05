@@ -40,6 +40,12 @@ class	Scene
 {
 	public:
 		Scene(void);
+		unsigned int getVolumePrimarySamples(void) const { return _volumePrimarySamples; }
+		void setVolumePrimarySamples(int value);
+		int getVolumePrimaryMaxSteps(void) const { return _volumePrimaryMaxSteps; }
+		void setVolumePrimaryMaxSteps(int value);
+		bool getVolumeReference(void) const { return _volumeReference; }
+		void setVolumeReference(bool value) { _volumeReference = value; }
 		~Scene(void);
 		void	addCamera(Camera camera);
 		void	addHittable(std::shared_ptr<Hittable> hittable);
@@ -163,6 +169,9 @@ class	Scene
 
 
 	private:
+		unsigned int _volumePrimarySamples = 4;
+		int _volumePrimaryMaxSteps = 1024;
+		bool _volumeReference = false;
 		double					_t_max;
 		int						_sampleCount;
 		bool					_adaptiveSampling;

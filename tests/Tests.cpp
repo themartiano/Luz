@@ -3686,7 +3686,7 @@ namespace
 			require(cinematicScene.getHittables().size() == 1, "Cinematic cloud quality scene did not load one hittable.");
 			const std::shared_ptr<CloudVolume> cinematicCloud = std::dynamic_pointer_cast<CloudVolume>(cinematicScene.getHittables()[0]);
 			require(cinematicCloud != nullptr, "Cinematic cloud quality scene did not create a CloudVolume.");
-			require(cinematicCloud->getParameters().detailOctaves == 4, "Cinematic quality did not promote cumulus detail octaves.");
+			require(cinematicCloud->getParameters().detailOctaves == CloudVolume::preset(CloudType::Cumulus).detailOctaves, "Cinematic quality changed the authored density octaves.");
 			require(cinematicCloud->getParameters().maxTrackingSteps == 1024, "Cinematic quality did not promote the integration budget.");
 		}
 		std::filesystem::remove(scenePath);
@@ -7176,6 +7176,21 @@ namespace
 				"Residual ratio tracking was not zero-variance in a uniform interior."
 			);
 		}
+		GridVolumeParameters directParameters = uniformParameters;
+		directParameters.directionalCache = false;
+		SparseGridVolume directVolume(directParameters);
+		double directDepth, cachedDepth;
+		const Vector3 depthPoint(0.0, 0.0, 0.0), depthDirection(1.0, 0.0, 0.0);
+		require(directVolume.directionalOpticalDepth(depthPoint, depthDirection, directDepth),
+			"Uncached grid did not provide optical depth for reconstruction.");
+		require(uniformVolume.directionalOpticalDepth(depthPoint, depthDirection, cachedDepth),
+			"Cached grid did not provide optical depth.");
+		requireNearTolerance(directDepth, cachedDepth, 0.03,
+			"Disabling the grid cache changed uniform optical depth.");
+		directParameters.extinction = 100.0;
+		SparseGridVolume opaqueDirectVolume(directParameters);
+		require(opaqueDirectVolume.directionalOpticalDepth(depthPoint, depthDirection, directDepth)
+			&& directDepth > 20.0, "Uncached optical depth was truncated at the shadow cutoff.");
 		auto numericalFullShadow = [&uniformVolume](const Ray& sourceRay)
 		{
 			double entry = 0.0;
@@ -7435,6 +7450,7 @@ namespace
 				<< "scatter_falloff=0.8\n"
 				<< "scatter_compensation=0.6\n"
 				<< "quality=final\n"
+				<< "directional_cache=0\n"
 				<< "}\n";
 		}
 		Scene scene;
@@ -7442,6 +7458,7 @@ namespace
 		require(scene.getHittables().size() == 1, "Grid volume scene did not load one volume.");
 		const std::shared_ptr<SparseGridVolume> parsed = std::dynamic_pointer_cast<SparseGridVolume>(scene.getHittables()[0]);
 		require(parsed != nullptr, "volume_grid did not create a SparseGridVolume.");
+		require(!parsed->getParameters().directionalCache, "Grid cache switch was not parsed.");
 		requireVectorNear(parsed->getParameters().position, Vector3(1.0, 2.0, 3.0), "Grid volume position");
 		requireVectorNear(parsed->getParameters().rotationDegrees, Vector3(0.0, 0.0, 90.0), "Grid volume rotation");
 		require(parsed->getParameters().shadowSamplesPerBrick == 12, "Final grid volume shadow quality was not applied.");
@@ -7590,10 +7607,14 @@ namespace
 	}
 }
 
+#include "CloudTransportTests.hpp"
+
 int	main(void)
 {
 	try
 	{
+		testCloudAccelerationAndReferenceTransport();
+		testCloudQualityControls();
 		testColorMath();
 		testViewTransformBlackPixel();
 		testACESViewTransformCompressesHighlights();

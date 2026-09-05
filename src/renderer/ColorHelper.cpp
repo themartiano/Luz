@@ -1335,7 +1335,7 @@ namespace
 		const std::vector<const DensityVolume*>& clouds
 	)
 	{
-		if (clouds.empty())
+		if (clouds.empty() || scene.getVolumeReference())
 			return (PrimaryCloudControl());
 		std::vector<const DirectionalLight*> directionalLights;
 		for (const std::shared_ptr<Hittable>& light : scene.getLights())
@@ -1385,11 +1385,11 @@ namespace
 		const Vector3 cameraDirection = cameraRay.getDirection() / rayLength;
 		const double interval = exitT - entryT;
 		const double pathLength = interval * rayLength;
-		const int stepCount = std::clamp(
-			static_cast<int>(std::ceil(pathLength / std::max(1.0, minimumFeatureScale * 0.05))),
-			48,
-			1024
-		);
+		const int stepCount = static_cast<int>(std::clamp(
+			std::ceil(pathLength / std::max(1.0, minimumFeatureScale * 0.05)),
+			48.0,
+			static_cast<double>(scene.getVolumePrimaryMaxSteps())
+		));
 		const double stepT = interval / static_cast<double>(stepCount);
 		const double stepDistance = stepT * rayLength;
 		const Vector3 skyDirection = hasDiffuseAtmosphere
@@ -1422,13 +1422,17 @@ namespace
 		Color result(0.0, 0.0, 0.0);
 		double cameraCloudTransmittance = 1.0;
 
+		std::vector<double> extinctions(clouds.size());
 		for (int step = 0; step < stepCount; step++)
 		{
 			const double sampleT = entryT + (static_cast<double>(step) + 0.5) * stepT;
 			const Vector3 position = cameraRay.pointAtRay(sampleT);
 			double totalExtinction = 0.0;
-			for (const DensityVolume* cloud : clouds)
-				totalExtinction += cloud->extinctionAt(position);
+			for (std::size_t i = 0; i < clouds.size(); i++)
+			{
+				extinctions[i] = clouds[i]->extinctionAt(position);
+				totalExtinction += extinctions[i];
+			}
 			if (totalExtinction <= 0.0)
 				continue;
 
@@ -1448,13 +1452,15 @@ namespace
 				double directionalOpticalDepth = 0.0;
 				bool hasDirectionalOpticalDepth = false;
 				bool missingDirectionalOpticalDepth = false;
-				for (const DensityVolume* cloud : clouds)
+				for (std::size_t i = 0; i < clouds.size(); i++)
 				{
-					const double cloudExtinction = cloud->extinctionAt(position);
-					scatteringCoefficient += cloud->singleScatteringCoefficientAt(
+					const DensityVolume* cloud = clouds[i];
+					const double cloudExtinction = extinctions[i];
+					scatteringCoefficient += cloud->singleScatteringWithExtinction(
 						position,
 						cameraDirection,
-						lightDirection
+						lightDirection,
+						cloudExtinction
 					);
 					bulkScatteringCoefficient += cloud->volumeAlbedo()
 						* cloudExtinction;
@@ -1590,9 +1596,10 @@ namespace
 					double skyOpticalDepth = environmentUpwardOpticalDepth;
 					bool hasSkyOpticalDepth = hasDiffuseEnvironment;
 					bool missingSkyOpticalDepth = false;
-					for (const DensityVolume* cloud : clouds)
+					for (std::size_t i = 0; i < clouds.size(); i++)
 					{
-						const double cloudExtinction = cloud->extinctionAt(position);
+						const DensityVolume* cloud = clouds[i];
+						const double cloudExtinction = extinctions[i];
 						bulkScatteringCoefficient += cloud->volumeAlbedo() * cloudExtinction;
 						bulkExtinctionSum += cloudExtinction;
 						falloffExtinctionSum += cloudExtinction
@@ -2054,9 +2061,10 @@ namespace
 
 Color	Renderer::internal::_calculatePixelColor(Scene& scene, const RenderCamera& renderCamera, std::size_t x, std::size_t y)
 {
+	Sampler::setReferenceVolumeTransport(scene.getVolumeReference());
 	Ray	ray = internal::_generateRay(renderCamera, x, y);
 
-	return (calculateLightRaysColor(ray, scene, nullptr, nullptr, x, y, true));
+	return (calculateLightRaysColor(ray, scene, nullptr, nullptr, x, y, !scene.getVolumeReference()));
 }
 
 Renderer::internal::RenderSample	Renderer::internal::_calculatePixelSample(
@@ -2067,6 +2075,7 @@ Renderer::internal::RenderSample	Renderer::internal::_calculatePixelSample(
 	bool calculatePrimarySingleScattering
 )
 {
+	Sampler::setReferenceVolumeTransport(scene.getVolumeReference());
 	Sampler::setFeatureSampling(true);
 	Ray	ray = internal::_generateRay(renderCamera, x, y);
 	RenderSample sample;
@@ -2108,13 +2117,14 @@ Renderer::internal::RenderSample	Renderer::internal::_calculatePixelSample(
 	}
 	else
 		sample.primarySingleScattering = Color(0.0, 0.0, 0.0);
-	sample.color = calculateLightRaysColor(ray, scene, nullptr, nullptr, x, y, true);
+	sample.color = calculateLightRaysColor(ray, scene, nullptr, nullptr, x, y, !scene.getVolumeReference());
 	return (sample);
 }
 
 // Properly calculates light rays bounces, reflections, refractions, intersection, etc and returns the resulting color
 Color	Renderer::internal::_calculateLightRaysColor(const Ray& ray, Scene& scene)
 {
+	Sampler::setReferenceVolumeTransport(scene.getVolumeReference());
 	return (calculateLightRaysColor(ray, scene, nullptr, nullptr, 0, 0, false));
 }
 

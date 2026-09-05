@@ -122,9 +122,10 @@ sampled cobalt-sky environment, and writes a denoised companion image.
 
 `disney-cloud-hero-closeup.luz` is the practical hero-render configuration: it
 keeps the native dense Disney field and reconstructs low-frequency high-order
-scattering while the path tracer resolves the directional residual. For an
-unapproximated transport reference, `disney-cloud-reference.luz` uses full
-collision-depth extinction, 64 light bounces, and a 1024-spp budget. It is
+scattering while the path tracer resolves the directional residual. For a stochastic
+transport reference, `disney-cloud-reference.luz` enables `volume_reference=1`,
+full collision-depth extinction, 64 light bounces, and a fixed 1024-spp budget
+without denoising. The atmosphere model and finite bounce limit still apply. It is
 intentionally much slower and noisier until deeply converged.
 
 `disney-cloud-hero-closeup.luz` uses the field's broad native face and a tighter
@@ -153,6 +154,20 @@ and rays that begin inside occupied density. Their exposures were checked from
 scene-linear float TIFF output and the final ACES display output, including
 non-finite values, HDR highlight latitude, display clipping, and digital-black
 shadow counts.
+
+Procedural clouds also support conservative local tracking bounds, optional sun/sky
+optical-depth caching, independent integration budgets, and spatial weather/base
+variation. `quality` now changes integration accuracy without changing authored
+noise octaves. Existing octave counts can be pinned with `detail_octaves`.
+
+```sh
+./luz examples/scenes/procedural-weather-cumulus.luz --threads 8
+```
+
+Use `volume_reference=1` in `[settings]` to compare against stochastic volume
+transport without directional caches, depth falloff or primary-light replacement.
+See [cloud settings](docs/scene-files.md#procedural-clouds) and the
+[native cloud benchmark](docs/benchmarks.md#native-cloud-matrix).
 
 The procedural generalization set exercises independent cloud generators,
 camera heights, and illumination rather than reusing the Disney density field:

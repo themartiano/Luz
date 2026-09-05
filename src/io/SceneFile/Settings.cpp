@@ -197,6 +197,24 @@ void	SceneFile::internal::_readSettingsSection(Scene& scene, std::ifstream& stre
 			scene.getImage()->setHeight(static_cast<std::size_t>(y));
 			scene.getImage()->initialize();
 		}
+		else if (lowerLine.rfind("volume_primary_samples=", 0) == 0
+			|| lowerLine.rfind("volume_primary_max_steps=", 0) == 0
+			|| lowerLine.rfind("volume_reference=", 0) == 0)
+		{
+			const double parsed = parseFiniteDouble(settingValue(line, "Missing volume setting value."), "Volume setting");
+			if (parsed < 0.0 || parsed > 65536.0 || parsed != std::floor(parsed))
+				throw std::runtime_error("Volume settings require an integer in range.");
+			const int value = static_cast<int>(parsed);
+			if (lowerLine.rfind("volume_primary_samples=", 0) == 0)
+				scene.setVolumePrimarySamples(value);
+			else if (lowerLine.rfind("volume_primary_max_steps=", 0) == 0)
+				scene.setVolumePrimaryMaxSteps(value);
+			else
+			{
+				requireBinarySetting(value, "volume_reference");
+				scene.setVolumeReference(value != 0);
+			}
+		}
 		else if (lowerLine.rfind("samples=", 0) != std::string::npos)
 		{
 			int samples;

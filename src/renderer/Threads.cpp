@@ -29,7 +29,6 @@ namespace
 	using PrimaryRayClass = Renderer::internal::PrimaryRayClass;
 
 	constexpr unsigned int DENOISE_GUIDE_SAMPLE_COUNT = 4;
-	constexpr unsigned int PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT = 4;
 	constexpr std::uint32_t VOLUME_GUIDING_STREAM = 0x47554944u;
 
 	double	radicalInverse(std::uint64_t index, std::uint32_t base)
@@ -412,11 +411,11 @@ namespace
 		{
 			configuredMinimum = scene.getAdaptiveVolumeMinSamples();
 		}
-		if (primaryClass == PrimaryRayClass::Background)
+		if (!scene.getVolumeReference())
 		{
 			configuredMinimum = std::max(
 				configuredMinimum,
-				static_cast<int>(PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT)
+				static_cast<int>(scene.getVolumePrimarySamples())
 			);
 		}
 		return (static_cast<unsigned int>(
@@ -906,7 +905,7 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 		{
 			Sampler::beginPixelSample(x, y, samples);
 			Color sampleColor;
-			if (samples < PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT)
+			if (samples < scene.getVolumePrimarySamples())
 			{
 				const RenderSample sample = _calculatePixelSample(scene, renderCamera, x, y, true);
 				sampleColor = cleanColor(sample.color);
@@ -965,9 +964,9 @@ unsigned int	Renderer::internal::_threadRender(Scene& scene, const RenderCamera&
 		Denoise::FeatureVector sampleFeatures;
 
 		Sampler::beginPixelSample(x, y, samples, halfIndex + 1);
-		if (samples < DENOISE_GUIDE_SAMPLE_COUNT)
+		if (samples < std::max(DENOISE_GUIDE_SAMPLE_COUNT, scene.getVolumePrimarySamples()))
 		{
-			const bool calculatePrimarySingleScattering = samples < PRIMARY_CLOUD_CONTROL_SAMPLE_COUNT;
+			const bool calculatePrimarySingleScattering = samples < scene.getVolumePrimarySamples();
 			const RenderSample sample = _calculatePixelSample(
 				scene,
 				renderCamera,

@@ -31,6 +31,7 @@ struct GridVolumeParameters
 	double metersPerUnit = 1.0;
 	int shadowSamplesPerBrick = 4;
 	double primaryDetail = 1.0;
+	bool directionalCache = true;
 };
 
 // Authored heterogeneous medium backed by Luz's dependency-free sparse grid.
@@ -57,6 +58,10 @@ class SparseGridVolume : public Hittable, public DensityVolume
 			const Vector3& position,
 			const Vector3& incidentDirection,
 			const Vector3& scatteredDirection
+		) const override;
+		Color singleScatteringWithExtinction(
+			const Vector3& position, const Vector3& incidentDirection,
+			const Vector3& scatteredDirection, double extinction
 		) const override;
 		Color volumeAlbedo(void) const override;
 		double volumeFeatureScale(void) const override;
@@ -129,6 +134,7 @@ class SparseGridVolume : public Hittable, public DensityVolume
 		std::shared_ptr<const DirectionalTransmittanceCache> buildDirectionalCache(
 			const Vector3& direction
 		) const;
+		double integratedDirectionalOpticalDepth(const Ray& ray) const;
 		double cachedDirectionalOpticalDepth(
 			const DirectionalTransmittanceCache& cache,
 			const Vector3& position

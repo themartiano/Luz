@@ -212,3 +212,57 @@ are:
 - `BENCH_DENOISE`: override the default denoising state
 - `BENCH_ADAPTIVE`: override the default adaptive sampling state
 - `BENCH_SCORE_SAMPLE_UNIT`: score divisor, defaulting to `1000`
+
+## Native Cloud Matrix
+
+`tools/benchmark_clouds.py` runs daylight, backlit, interior, cirrus and stratus
+scenes with fixed samples, seeds and threads, without denoising or adaptive
+sampling. It records process time (including cache construction), image hashes
+and optional display-space reference error in `results.csv`. Authored scenes
+require the local Disney volume; missing assets fail explicitly. Temporary
+scene files are removed after each case.
+
+```sh
+python3 tools/benchmark_clouds.py --output /tmp/cloud-direct --cache-resolution 0
+python3 tools/benchmark_clouds.py --output /tmp/cloud-cached --cache-resolution 4 \
+  --reference-directory /tmp/cloud-direct
+python3 tools/benchmark_clouds.py --output /tmp/cloud-reference --reference \
+  --samples 512 --repeat 1
+```
+
+Cache-on/off differences include spatially resolved multiple-scattering fill as
+well as interpolation. For a pure shadow-cache error comparison, set
+`multiple_scattering_compensation=0` in both inputs. Use high-sample references
+and compare multiple seeds before choosing a cache resolution. Low-sample
+image disagreement is not an unbiased estimate of approximation error.
+Reference mode retains the configured finite bounce limit and atmosphere model;
+raise bounce counts for thick clouds. Keep quality, primary samples and primary
+march caps fixed when measuring transport changes.
+
+### September 2026 Cloud Implementation Check
+
+Three fixed-seed runs on the same machine, 128×72, 8 spp, one thread,
+no adaptive sampling or denoising, using `procedural-cumulus-daylight.luz`.
+The updated builds explicitly use `primary_detail=1` to match the previous
+camera march; the scene's authored four density octaves remain fixed.
+Process times include setup and cache construction.
+
+| Mode | Median process time |
+| --- | ---: |
+| Captured pre-change executable | 15.80 s |
+| Updated, direct procedural shadows | 11.40 s |
+| Updated, directional cache resolution 4 | 2.83 s |
+
+Direct mode reduced elapsed time by 27.9%. The opt-in cached mode was
+4.03× faster than updated direct mode (5.58× versus the pre-change executable).
+Repeated output hashes were stable within each mode. The isolated density-reuse
+change produced a byte-identical PNG to the pre-change renderer; local-majorant
+tracking subsequently changes stochastic sample locations.
+
+Cached versus direct RGB display-space disagreement was 0.02787 RMSE on [0,1]
+(31.10 dB PSNR). This includes the newly spatially resolved reconstruction fill
+and low-sample stochastic differences, so it is **not** a converged cache-error
+bound or an equal-quality speedup. The cache stays opt-in. Unit tests independently
+check cache transmittance against dense quadrature, conservative continuous-field
+bounds across all five presets, concurrent cache publication, truncated shadows,
+reference free flight/ratio tracking, and quality-independent density.

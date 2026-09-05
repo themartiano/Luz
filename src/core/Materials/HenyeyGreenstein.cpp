@@ -54,7 +54,7 @@ namespace
 
 	double depthReducedAnisotropy(double anisotropy, bool enabled)
 	{
-		if (!enabled)
+		if (!enabled || Sampler::isReferenceVolumeTransport())
 			return (anisotropy);
 		const double magnitude = std::pow(
 			std::fabs(anisotropy),

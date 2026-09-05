@@ -51,6 +51,8 @@ namespace Sampler
 	bool	isVolumeControlSampling(void);
 	void	setDirectionalShadowSampling(bool enabled);
 	bool	isDirectionalShadowSampling(void);
+	void setReferenceVolumeTransport(bool enabled);
+	bool isReferenceVolumeTransport(void);
 	void	endPixelSample(void);
 	bool	isActive(void);
 

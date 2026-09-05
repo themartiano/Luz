@@ -25,6 +25,15 @@ class DensityVolume
 			const Vector3& incidentDirection,
 			const Vector3& scatteredDirection
 		) const = 0;
+		// Reuse extinction already evaluated at this integration point.
+		virtual Color singleScatteringWithExtinction(
+			const Vector3& position, const Vector3& incidentDirection,
+			const Vector3& scatteredDirection, double extinction
+		) const
+		{
+			(void)extinction;
+			return singleScatteringCoefficientAt(position, incidentDirection, scatteredDirection);
+		}
 		virtual Color volumeAlbedo(void) const = 0;
 		virtual double volumeFeatureScale(void) const = 0;
 		virtual double multipleScatteringFalloff(void) const = 0;

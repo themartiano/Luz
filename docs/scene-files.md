@@ -43,6 +43,9 @@ The parser is intentionally strict: unknown lines and malformed values throw an 
 | `adaptivethreshold` | `adaptivethreshold=F` | Relative 95% confidence interval threshold for luminance convergence. Lower values render longer. Alias: `adaptive_threshold`. |
 | `adaptivecheckinterval` | `adaptivecheckinterval=N` | Sample interval between adaptive convergence checks. Alias: `adaptive_check_interval`. |
 | `maxlightbounces` | `maxlightbounces=N` | Maximum recursive light bounces. |
+| `volume_primary_samples` | `volume_primary_samples=N` | Camera samples for deterministic primary cloud lighting, 1–256, default 4; clamped by total pixel samples. Adaptive rendering waits for this budget. Increase for thin silhouettes and depth of field. |
+| `volume_primary_max_steps` | `volume_primary_max_steps=N` | Camera integration cap, 48–65536, default 1024. Use with cloud/grid `primary_detail` for fine structures over long intervals. |
+| `volume_reference` | `volume_reference=0` or `1` | Default 0. At 1, bypass primary-light replacement, finite-order compensation, directional caches and bounce-dependent extinction/phase reduction. Procedural shadows use ratio tracking; grid shadows use residual ratio tracking. The scene's finite bounce limit, atmosphere model, adaptive sampling, output transforms and denoiser still apply; disable adaptive/denoise and increase bounces/samples for comparisons. |
 | `volume_guiding_samples` | `volume_guiding_samples=N` | Total camera paths used to train the optional spatial-directional volume guide before rendering. `0` disables learned guiding and is the default. Alias: `volumeguidingsamples`. |
 | `volume_guiding_resolution` | `volume_guiding_resolution=N` | Cells per axis in the learned guide, from 1 through 128. Defaults to 16. The combined field is rejected before allocation if it would exceed 512 MiB. Alias: `volumeguidingresolution`. |
 | `volume_guiding_lobes` | `volume_guiding_lobes=N` | Directional lobes per cell, from 4 through 64. Defaults to 16. Alias: `volumeguidinglobes`. |
@@ -493,8 +496,9 @@ well.
 | `multiple_scattering_falloff` | `multiple_scattering_falloff=F` | Per-bounce extinction falloff in `(0,1]`; `1` is full path-traced reference mode. Alias: `scatter_falloff`. |
 | `multiple_scattering_compensation` | `multiple_scattering_compensation=F` | Smooth finite-order energy reconstruction in `[0,2]` when falloff is below one. Alias: `scatter_compensation`. |
 | `quality` | `preview`, `production`, `cinematic`, `final`, or `reference` | Sets deterministic shadow samples per occupied brick to 2, 4, 8, 12, or 16. Primary-control detail is 0.5x, 1x, 2x, 8x, or 16x; the two highest tiers keep deterministic camera marches below the visible pixel scale of hero-cloud renders. |
+| `directional_cache` | `directional_cache=0` or `1` | Default 1. Set to 0 for a cache-only comparison: integrate directional optical depth directly while preserving the reconstruction model and depth falloff. This does not enable `volume_reference`. |
 | `shadow_samples_per_brick` | `shadow_samples_per_brick=N` | Explicit deterministic finite-segment and feature-guide integration budget from 1 through 32; overrides `quality`. Only full-volume infinite-directional-light shadows use the swept optical-depth field; finite lights and environment directions do not. Alias: `shadow_quality`. |
-| `primary_detail` | `primary_detail=F` | Primary single-scattering control detail from 0.25 through 16. Higher values take finer camera-ray steps and a finer directional optical-depth lattice, preserving small billows and preventing visible march bands in the unfiltered deterministic layer. Camera integration is capped at 1024 steps and the cache at 16 million samples; overrides `quality`. Aliases: `control_detail`, `primarydetail`. |
+| `primary_detail` | `primary_detail=F` | Primary single-scattering control detail from 0.25 through 16. Higher values take finer camera-ray steps and a finer directional optical-depth lattice, preserving small billows and preventing visible march bands in the unfiltered deterministic layer. Camera integration defaults to a 1024-step cap (`volume_primary_max_steps` raises it) and the cache is capped at 16 million samples; overrides `quality`. Aliases: `control_detail`, `primarydetail`. |
 
 ```text
 volume_grid disney_hero {
@@ -539,8 +543,8 @@ sample extinction is `4 / 25.4 = 0.1575` inverse metres; keeping the old
 thin-medium value erases the characteristic cauliflower structure. The default
 scene uses the bounded `0.8`/`0.72` production reconstruction. The separate
 `examples/scenes/disney-cloud-reference.luz` uses falloff `1`, compensation `0`,
-64 light bounces, and 1024 spp for an unapproximated but expensive convergence
-reference.
+`volume_reference=1`, 64 light bounces, and a fixed 1024 spp without denoising
+for an expensive stochastic convergence reference.
 
 The backlit, dusk, and interior companion scenes exercise highlight latitude,
 deep self-shadowing, opposite-side lighting, and a camera beginning inside
@@ -592,7 +596,12 @@ texture or post-process.
 | `shear_direction` | `shear_direction=(x,y,z)` | Horizontal direction of upper-crown advection and cirrus streaks. Only X/Z are used and the vector is normalized; `(0,0,0)` selects a deterministic direction from `seed`. Alias: `wind_direction`. |
 | `seed` | `seed=N` | Unsigned 32-bit procedural generation seed. |
 | `offset` | `offset=(x,y,z)` | Translates the noise field without moving the bounds. Use changing offsets to generate wind animation frames. Alias: `noise_offset`. |
-| `quality` | `quality=preview`, `production`, or `cinematic` | Convenience budget. Preview uses at most 2 detail octaves and a 128-step integration cap, production preserves the preset octave count and sets a 512-step cap, and cinematic uses at least 4 octaves and sets a 1024-step cap. Explicit `detail_octaves` or `max_steps` wins over the quality value, regardless of property order. `final` aliases `production`. |
+| `quality` | `quality=preview`, `production`, or `cinematic` | Integration budget only: primary detail 0.5x, 1x or 2x and shadow/feature caps 128, 512 or 1024. `final` aliases `production`. Does not change density octaves. Explicit `primary_detail` or `max_steps` wins regardless of order. |
+| `primary_detail` | `primary_detail=F` | Camera integration detail, 0.25–16; default 1. Increase with `volume_primary_max_steps` to resolve small structures. |
+| `directional_cache_resolution` | `directional_cache_resolution=F` | Opt-in approximate sun/sky optical-depth cache; 0 disables it (default), 1–16 cells per feature is a practical range. Each axis is capped at 256 cells, each direction at 1,048,576 float samples and each cloud at four cached directions (16 MiB total). Further directions and finite shadow segments fall back to integration. Increase resolution and compare with cache disabled to assess interpolation error. |
+| `tracking_majorants` | `tracking_majorants=0` or `1` | Default 1. Conservative cell bounds accelerate free flight and empty-density queries. Zero keeps global occupied-cell bounds and direct density evaluation for diagnostics. |
+| `weather_variation` | `weather_variation=F` | Convective construction variation, 0–1, default 0. Correlates lobe sizes, growth and gaps with a broad weather field, and increases column jitter. |
+| `base_variation` | `base_variation=F` | Convective condensation-base variation, 0–1, default 0. Raises and softens the base with a coherent horizontal field. |
 | `detail_octaves` | `detail_octaves=N` | Explicit detail octave count from 1 through 8. Alias: `octaves`. |
 | `max_steps` | `max_steps=N` | Deterministic shadow and feature-guide integration cap, from 1 through 4096. It does not cap stochastic collision tracking: camera and continuation rays delta-track until they leave the cloud, avoiding a biased early exit. Alias: `tracking_steps`. |
 
@@ -661,9 +670,7 @@ iso-density gradients as surface normals and prevents low-spp regression curves
 from being embossed into the cloud. Below 64 samples the full residual filter
 remains active because sparse events can underestimate variance; at 64 or more,
 per-pixel mean variance reduces unnecessary wide filtering in converged regions.
-With
-falloff `1`, both reconstruction controls are inactive and the renderer retains
-the full path-traced reference mode. See `examples/scenes/path-traced-clouds.luz` for a close-up and
+With falloff `1`, reconstruction is inactive; deterministic primary integration and directional caches still apply. Set `volume_reference=1` to disable those volume transport approximations as well. See `examples/scenes/path-traced-clouds.luz` for a close-up and
 `examples/scenes/path-traced-cloudscape.luz` for an aerial layered scene.
 
 The implementation follows the macro/detail separation used by Schneider and

@@ -257,6 +257,12 @@ CloudVolume::CloudVolume(const CloudParameters& parameters)
 	requireUnitInterval(parameters.dominance, "dominance");
 	requireUnitInterval(parameters.overhang, "overhang");
 	requireUnitInterval(parameters.fineDetail, "fine detail");
+	requireUnitInterval(parameters.weatherVariation, "weather variation");
+	requireUnitInterval(parameters.baseVariation, "base variation");
+	if (!std::isfinite(parameters.primaryDetail) || parameters.primaryDetail < 0.25 || parameters.primaryDetail > 16.0)
+		throw std::invalid_argument("Cloud primary detail must be between 0.25 and 16.");
+	if (!std::isfinite(parameters.directionalCacheResolution) || parameters.directionalCacheResolution < 0.0 || parameters.directionalCacheResolution > 16.0)
+		throw std::invalid_argument("Cloud directional cache resolution must be between zero and 16.");
 	if (
 		!std::isfinite(parameters.multipleScatteringFalloff)
 		|| parameters.multipleScatteringFalloff <= 0.0
@@ -343,6 +349,9 @@ CloudVolume::CloudVolume(const CloudParameters& parameters)
 		parameters.multipleScatteringFalloff < 1.0
 	);
 	this->buildConvectiveLobes();
+	if (this->_lobeGrid.empty())
+		this->buildLobeGrid();
+	this->buildDensityMajorants();
 }
 
 Material* CloudVolume::getMaterial(void) const
@@ -546,6 +555,15 @@ void CloudVolume::buildConvectiveLobes(void)
 		return (hashUnit(mixBits(this->_parameters.seed ^ mixBits(index + salt))));
 	};
 	auto appendLobe = [this](Vector3 center, Vector3 radius, double strength) {
+		if (this->_parameters.weatherVariation > 0.0)
+		{
+			const Vector3 p = (center - this->_parameters.position) / (this->_parameters.featureScale * 3.0);
+			const double weather = this->fbm(Vector3(p.getX(), 0.73, p.getZ()), 2, 0x71931abdu);
+			const double variation = this->_parameters.weatherVariation * (2.0 * weather - 1.0);
+			radius = radius * (1.0 + 0.65 * variation);
+			center.setY(this->_minimum.getY()
+				+ (center.getY() - this->_minimum.getY()) * (1.0 + 0.30 * variation));
+		}
 		radius.setX(std::min(radius.getX(), this->_parameters.size.getX() * 0.499));
 		radius.setY(std::min(radius.getY(), this->_parameters.size.getY() * 0.499));
 		radius.setZ(std::min(radius.getZ(), this->_parameters.size.getZ() * 0.499));
@@ -1084,6 +1102,11 @@ void CloudVolume::buildConvectiveLobes(void)
 				);
 				formation = 0.74 * weather + 0.26 * formation;
 			}
+			if (this->_parameters.weatherVariation > 0.0)
+			{
+				const double weather = this->fbm(Vector3(x * 0.29, 1.73, z * 0.29), 2, 0x49178a3du);
+				formation += this->_parameters.weatherVariation * 0.50 * (2.0 * weather - 1.0);
+			}
 			formation = clamp01(formation + 0.10 * (randomValue(column, 0x11a53u) - 0.5));
 			if (formation < formationThreshold)
 				continue;
@@ -1103,9 +1126,8 @@ void CloudVolume::buildConvectiveLobes(void)
 			const double deckStagger = this->_parameters.type == CloudType::Stratocumulus
 				? (z % 2 == 0 ? -0.20 : 0.20) * cellX
 				: 0.0;
-			const double cellJitter = this->_parameters.type == CloudType::Stratocumulus
-				? 0.82
-				: 0.58;
+			const double cellJitter = (this->_parameters.type == CloudType::Stratocumulus
+				? 0.82 : 0.58) + 0.30 * this->_parameters.weatherVariation;
 			const double baseX = startX + static_cast<double>(x) * cellX + deckStagger
 				+ (randomValue(column, 0x72e31u) - 0.5) * cellX * cellJitter;
 			const double baseZ = startZ + static_cast<double>(z) * cellZ
@@ -1269,8 +1291,6 @@ void CloudVolume::buildConvectiveLobes(void)
 
 void CloudVolume::buildLobeGrid(void)
 {
-	if (this->_lobes.empty())
-		return;
 	const double cellSize = std::max(1e-6, this->_parameters.featureScale);
 	this->_lobeGridX = clampedCeilToInt(this->_parameters.size.getX() / cellSize, 1, 64);
 	this->_lobeGridY = clampedCeilToInt(this->_parameters.size.getY() / cellSize, 1, 64);
@@ -1313,6 +1333,81 @@ void CloudVolume::buildLobeGrid(void)
 					this->_lobeGrid[gridIndex].push_back(lobeIndex);
 				}
 	}
+}
+
+void CloudVolume::buildDensityMajorants(void)
+{
+	_densityMajorants.assign(_lobeGrid.size(), 0.0);
+	const Vector3 cell(_parameters.size.getX() / _lobeGridX,
+		_parameters.size.getY() / _lobeGridY, _parameters.size.getZ() / _lobeGridZ);
+	const double warp = _parameters.featureScale *
+		(0.16 + 0.12 * _parameters.fineDetail + 0.18 * _parameters.erosion);
+	const Vector3 padding(warp * 0.5, warp * 0.36, warp * 0.5);
+	for (int z = 0; z < _lobeGridZ; z++)
+	for (int y = 0; y < _lobeGridY; y++)
+	for (int x = 0; x < _lobeGridX; x++)
+	{
+		const std::size_t index = (z * _lobeGridY + y) * _lobeGridX + x;
+		if (_parameters.coverage <= 0.0)
+			continue;
+		double bound = 0.0;
+		if (!_lobes.empty())
+		{
+			// Interval bound over the entire cell enlarged by the maximum warp.
+			// Every later density operation only removes energy from this union.
+			const Vector3 low = _minimum + Vector3(x * cell.getX(), y * cell.getY(), z * cell.getZ()) - padding;
+			const Vector3 high = low + cell + padding * 2.0;
+			double energy = 0.0;
+			for (const auto lobeIndex : _lobeGrid[index])
+			{
+				const auto& lobe = _lobes[lobeIndex];
+				double distanceSquared = 0.0;
+				for (int axis = 0; axis < 3; axis++)
+				{
+					const double distance = std::max({low[axis] - lobe.center[axis],
+						lobe.center[axis] - high[axis], 0.0}) / lobe.radius[axis];
+					distanceSquared += distance * distance;
+				}
+				const double contribution = lobe.strength * (1.0 - smoothstep(
+					lerp(0.52, 0.72, _parameters.puffiness), 1.0, std::sqrt(distanceSquared)));
+				energy += contribution * contribution * contribution;
+				if (energy >= 1.0)
+					break;
+			}
+			bound = smoothstep(0.025, 0.34, std::cbrt(energy));
+		}
+		else
+		{
+			// Weather/structure are in [0,1]. Bound the increasing and decreasing
+			// factors at opposite ends of the height interval, never at midpoints.
+			const double low = static_cast<double>(y) / _lobeGridY;
+			const double high = static_cast<double>(y + 1) / _lobeGridY;
+			if (_parameters.type == CloudType::Cirrus)
+				bound = smoothstep(0.04, 0.20, high) * (1.0 - smoothstep(0.68, 0.96, low));
+			else if (_parameters.type == CloudType::Stratus)
+				bound = smoothstep(0.015, 0.055, high) * (1.0 - smoothstep(0.79, 0.97, low));
+			else
+				bound = 1.0;
+			bound = smoothstep(0.025, 0.38, bound);
+		}
+		// Retain a small rounding margin without turning proven empty cells on.
+		_densityMajorants[index] = bound > 0.0 ? std::min(1.0, bound + 1e-9) : 0.0;
+	}
+}
+
+double CloudVolume::densityMajorantAt(const Vector3& position) const
+{
+	for (int axis = 0; axis < 3; axis++)
+		if (!std::isfinite(position[axis]) || position[axis] < _minimum[axis] || position[axis] > _maximum[axis])
+			return 0.0;
+	const Vector3 p = position + (_lobes.empty() ? Vector3(0.0, 0.0, 0.0) : _parameters.offset);
+	const int counts[3] = {_lobeGridX, _lobeGridY, _lobeGridZ};
+	int coordinates[3];
+	for (int axis = 0; axis < 3; axis++)
+		coordinates[axis] = static_cast<int>(std::clamp(std::floor(
+			(p[axis] - _minimum[axis]) / _parameters.size[axis] * counts[axis]), 0.0,
+			static_cast<double>(counts[axis] - 1)));
+	return _densityMajorants[(coordinates[2] * _lobeGridY + coordinates[1]) * _lobeGridX + coordinates[0]];
 }
 
 double CloudVolume::convectiveLobeField(const Vector3& position) const
@@ -1371,6 +1466,11 @@ double CloudVolume::densityAt(const Vector3& position) const
 	)
 		return (0.0);
 
+	// The same conservative bounds used by tracking also reject empty primary
+	// and shadow quadrature points before evaluating any noise.
+	if (_parameters.localMajorants && !_densityMajorants.empty() && densityMajorantAt(position) <= 0.0)
+		return 0.0;
+
 	const double height = (position.getY() - this->_minimum.getY()) / this->_parameters.size.getY();
 	const Vector3 advected = position + this->_parameters.offset;
 	const double featureScale = this->_parameters.featureScale;
@@ -1407,7 +1507,21 @@ double CloudVolume::densityAt(const Vector3& position) const
 			(warpY - 0.5) * warpAmplitude * 0.72,
 			(warpZ - 0.5) * warpAmplitude
 		);
+		double density = this->convectiveLobeField(warped);
+		density *= smoothstep(0.0, 0.022, height);
+		if (this->_parameters.baseVariation > 0.0 && density > 0.0)
+		{
+			const double baseWeather = this->fbm(Vector3(
+				basePosition.getX() * 0.22, 0.73, basePosition.getZ() * 0.22), 2, 0x731ca91du);
+			const double localBase = this->_parameters.baseVariation * (0.035 + 0.14 * baseWeather);
+			density *= smoothstep(localBase, localBase + 0.028, height);
+		}
+		density *= 1.0 - smoothstep(0.97, 1.0, height);
+		if (density <= 0.0)
+			return (0.0);
 		const bool shallowDeck = this->_parameters.type == CloudType::Stratocumulus;
+		if (!shallowDeck && density >= 0.80)
+			return 1.0;
 		const Vector3 shapePosition = shallowDeck
 			? Vector3(
 				basePosition.getX() * 0.38 + 8.7,
@@ -1427,9 +1541,7 @@ double CloudVolume::densityAt(const Vector3& position) const
 		const double shapeBillow = 1.0 - std::fabs(2.0 * shapeNoise - 1.0);
 		const double shapeSignal = 0.72 * shapeNoise + 0.28 * shapeBillow;
 		double boundarySignal = shapeSignal;
-		double density = this->convectiveLobeField(warped);
-		density *= smoothstep(0.0, 0.022, height);
-		density *= 1.0 - smoothstep(0.97, 1.0, height);
+
 		if (shallowDeck)
 		{
 			// Intersect the overlapping shallow cells with a coherent, spatially
@@ -1456,6 +1568,8 @@ double CloudVolume::densityAt(const Vector3& position) const
 		if (density <= 0.0)
 			return (0.0);
 
+		if (density >= 0.80)
+			return 1.0;
 		const double detailFrequency = lerp(3.2, 6.0, this->_parameters.fineDetail);
 		const Vector3 detailPosition(
 			basePosition.getX() * detailFrequency + 19.7,
@@ -1521,6 +1635,8 @@ double CloudVolume::densityAt(const Vector3& position) const
 	const double threshold = 1.0 - this->_parameters.coverage;
 	const double coverageWidth = std::max(0.045, this->_parameters.coverage * 0.24);
 	const double coverageMask = smoothstep(threshold - 0.075, threshold + coverageWidth, carrier);
+	if (coverageMask <= 0.0)
+		return 0.0;
 	double structure = carrier;
 	if (this->_parameters.type != CloudType::Cirrus)
 	{
@@ -1582,7 +1698,14 @@ Color CloudVolume::singleScatteringCoefficientAt(
 	const Vector3& scatteredDirection
 ) const
 {
-	const double extinction = this->extinctionAt(position);
+	return singleScatteringWithExtinction(position, incidentDirection, scatteredDirection, extinctionAt(position));
+}
+
+Color CloudVolume::singleScatteringWithExtinction(
+	const Vector3& position, const Vector3& incidentDirection,
+	const Vector3& scatteredDirection, double extinction
+) const
+{
 	if (extinction <= 0.0)
 		return (Color(0.0, 0.0, 0.0));
 	HitRecord hitRecord;
@@ -1604,13 +1727,13 @@ void CloudVolume::lobeGridCell(
 	double t,
 	double exitT,
 	double boundaryEpsilonT,
-	bool& occupied,
+	double& densityMajorant,
 	double& cellExitT
 ) const
 {
 	if (this->_lobeGrid.empty())
 	{
-		occupied = true;
+		densityMajorant = 1.0;
 		cellExitT = exitT;
 		return;
 	}
@@ -1619,7 +1742,8 @@ void CloudVolume::lobeGridCell(
 	// applying its bounded noise warp. The grid already pads every lobe by the
 	// maximum warp, so traversing that same translated field space preserves
 	// empty-cell skipping without discarding shifted density.
-	const Vector3 fieldOrigin = ray.getOrigin() + this->_parameters.offset;
+	const Vector3 fieldOrigin = ray.getOrigin()
+		+ (this->_lobes.empty() ? Vector3(0.0, 0.0, 0.0) : this->_parameters.offset);
 	const Vector3 point = fieldOrigin + ray.getDirection() * probeT;
 	auto coordinate = [](double value, double minimum, double extent, int count) {
 		return (std::clamp(
@@ -1634,7 +1758,9 @@ void CloudVolume::lobeGridCell(
 	const std::size_t gridIndex = static_cast<std::size_t>(
 		(z * this->_lobeGridY + y) * this->_lobeGridX + x
 	);
-	occupied = !this->_lobeGrid[gridIndex].empty();
+	densityMajorant = this->_densityMajorants[gridIndex];
+	if (!this->_parameters.localMajorants && densityMajorant > 0.0)
+		densityMajorant = 1.0;
 	const int coordinates[3] = {x, y, z};
 	const int counts[3] = {this->_lobeGridX, this->_lobeGridY, this->_lobeGridZ};
 	cellExitT = exitT;
@@ -1685,7 +1811,7 @@ bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& 
 	const double rayLength = Utilities::vectorLength(ray.getDirection());
 	if (!std::isfinite(rayLength) || rayLength <= 0.0)
 		return (false);
-	const double depthScale = std::pow(
+	const double depthScale = Sampler::isReferenceVolumeTransport() ? 1.0 : std::pow(
 		this->_parameters.multipleScatteringFalloff,
 		static_cast<double>(Sampler::currentBounce())
 	);
@@ -1699,10 +1825,10 @@ bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& 
 	);
 	for (std::uint32_t step = 0; ; step++)
 	{
-		bool occupied;
+		double densityMajorant;
 		double cellExitT;
-		this->lobeGridCell(ray, currentT, exitT, boundaryEpsilonT, occupied, cellExitT);
-		if (!occupied)
+		this->lobeGridCell(ray, currentT, exitT, boundaryEpsilonT, densityMajorant, cellExitT);
+		if (densityMajorant <= 0.0)
 		{
 			currentT = cellExitT + boundaryEpsilonT;
 			if (currentT >= exitT || !std::isfinite(currentT))
@@ -1720,7 +1846,7 @@ bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& 
 		);
 		const std::uint32_t dimension = CLOUD_TRACKING_DIMENSION
 			+ ((tupleHash & 0x01ffffffu) << 5u);
-		const double freeFlight = -std::log(std::max(1e-12, 1.0 - Sampler::sample1D(dimension))) / rate;
+		const double freeFlight = -std::log(std::max(1e-12, 1.0 - Sampler::sample1D(dimension))) / (rate * densityMajorant);
 		const double collisionT = currentT + freeFlight;
 		if (collisionT >= cellExitT)
 		{
@@ -1733,7 +1859,7 @@ bool CloudVolume::sampleCollision(Ray& ray, double t_min, double t_max, double& 
 		if (currentT >= exitT || !std::isfinite(currentT))
 			return (false);
 		const double density = this->densityAt(ray.pointAtRay(currentT));
-		if (density > 0.0 && Sampler::sample1D(dimension + CLOUD_ACCEPTANCE_OFFSET) < density)
+		if (density > 0.0 && Sampler::sample1D(dimension + CLOUD_ACCEPTANCE_OFFSET) < density / densityMajorant)
 		{
 			hitT = currentT;
 			return (true);
@@ -1916,6 +2042,67 @@ Color CloudVolume::shadowTransmittance(Ray& ray, double t_min, double t_max) con
 	if (!std::isfinite(rayLength) || rayLength <= 0.0 || this->_majorantSceneUnits <= 0.0)
 		return (Color(1.0, 1.0, 1.0));
 
+	if (Sampler::isReferenceVolumeTransport())
+	{
+		// Ratio tracking uses the same conservative piecewise majorant as free
+		// flight. No quadrature or opaque cutoff can hide thin features here.
+		double t = entryT;
+		double transmittance = 1.0;
+		const double epsilon = std::max(1e-10, _parameters.featureScale * 1e-7 / rayLength);
+		for (std::uint32_t event = 0; t < exitT; event++)
+		{
+			double majorant, cellExit;
+			lobeGridCell(ray, t, exitT, epsilon, majorant, cellExit);
+			if (majorant <= 0.0)
+			{
+				t = cellExit + epsilon;
+				continue;
+			}
+			const std::uint32_t hash = mixBits(_samplingStream ^ 0x718bc391u
+				^ mixBits(event) ^ mixBits(Sampler::currentBounce()));
+			const std::uint32_t dimension = CLOUD_TRACKING_DIMENSION + ((hash & 0x01ffffffu) << 5u);
+			t += -std::log(std::max(1e-12, 1.0 - Sampler::sample1D(dimension)))
+				/ (_majorantSceneUnits * rayLength * majorant);
+			if (t >= cellExit)
+			{
+				t = cellExit + epsilon;
+				continue;
+			}
+			transmittance *= std::max(0.0, 1.0 - densityAt(ray.pointAtRay(t)) / majorant);
+			if (transmittance <= 0.0)
+				return Color(0.0, 0.0, 0.0);
+			// Unbiased roulette keeps optically thick reference shadows bounded in
+			// expected cost without deterministically discarding their contribution.
+			if (transmittance < 0.05)
+			{
+				if (Sampler::sample1D(dimension + CLOUD_ACCEPTANCE_OFFSET) >= transmittance / 0.05)
+					return Color(0.0, 0.0, 0.0);
+				transmittance = 0.05;
+			}
+		}
+		return Color(transmittance, transmittance, transmittance);
+	}
+
+	// Only cache complete segments to fixed directional sources. Truncated
+	// shadows and stochastic directions retain the direct integrator.
+	if (!Sampler::isReferenceVolumeTransport()
+		&& (Sampler::isVolumeControlSampling() || Sampler::isDirectionalShadowSampling()))
+	{
+		double fullEntry, fullExit;
+		if (boundsInterval(ray, t_min, std::numeric_limits<double>::max(), fullEntry, fullExit)
+			&& t_max + std::max(1e-8, std::fabs(fullExit) * 1e-10) >= fullExit)
+		{
+			double opticalDepth;
+			if (directionalOpticalDepth(ray.pointAtRay(entryT), ray.getDirection(), opticalDepth))
+			{
+				opticalDepth *= std::pow(this->_parameters.multipleScatteringFalloff,
+					static_cast<double>(Sampler::currentBounce()));
+				const double transmittance = std::exp(-opticalDepth);
+				return Color(transmittance, transmittance, transmittance);
+			}
+		}
+	}
+
 	const double interval = exitT - entryT;
 	const double detailStepScale = std::clamp(
 		0.18 / std::pow(2.0, static_cast<double>(this->_parameters.detailOctaves - 1)),
@@ -1934,7 +2121,7 @@ Color CloudVolume::shadowTransmittance(Ray& ray, double t_min, double t_max) con
 	);
 	const double stepT = interval / static_cast<double>(stepCount);
 	const double stepDistance = stepT * rayLength;
-	const double depthScale = std::pow(
+	const double depthScale = Sampler::isReferenceVolumeTransport() ? 1.0 : std::pow(
 		this->_parameters.multipleScatteringFalloff,
 		static_cast<double>(Sampler::currentBounce())
 	);
@@ -1949,10 +2136,10 @@ Color CloudVolume::shadowTransmittance(Ray& ray, double t_min, double t_max) con
 		const double sampleT = entryT + (static_cast<double>(step) + 0.5) * stepT;
 		if (!this->_lobeGrid.empty())
 		{
-			bool occupied;
+			double densityMajorant;
 			double cellExitT;
-			this->lobeGridCell(ray, sampleT, exitT, boundaryEpsilonT, occupied, cellExitT);
-			if (!occupied)
+			this->lobeGridCell(ray, sampleT, exitT, boundaryEpsilonT, densityMajorant, cellExitT);
+			if (densityMajorant <= 0.0)
 			{
 				// Preserve the original global midpoint rule: jump directly to the
 				// first midpoint at or beyond this conservative empty-cell boundary.
@@ -1995,7 +2182,7 @@ Color CloudVolume::volumeAlbedo(void) const
 
 double CloudVolume::volumeFeatureScale(void) const
 {
-	return (this->_parameters.featureScale);
+	return (this->_parameters.featureScale / this->_parameters.primaryDetail);
 }
 
 double CloudVolume::multipleScatteringFalloff(void) const

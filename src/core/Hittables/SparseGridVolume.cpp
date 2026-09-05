@@ -825,7 +825,7 @@ bool SparseGridVolume::sampleCollision(Ray& ray, double t_min, double t_max, dou
 	const double rayLength = Utilities::vectorLength(ray.getDirection());
 	if (entryT >= exitT || !std::isfinite(rayLength) || rayLength <= 0.0)
 		return (false);
-	const double depthScale = std::pow(
+	const double depthScale = Sampler::isReferenceVolumeTransport() ? 1.0 : std::pow(
 		this->_parameters.multipleScatteringFalloff,
 		static_cast<double>(Sampler::currentBounce())
 	);
@@ -975,15 +975,15 @@ Color SparseGridVolume::shadowTransmittance(Ray& ray, double t_min, double t_max
 	const double rayLength = Utilities::vectorLength(ray.getDirection());
 	if (entryT >= exitT || !std::isfinite(rayLength) || rayLength <= 0.0)
 		return (Color(1.0, 1.0, 1.0));
-	const double depthScale = std::pow(
+	const double depthScale = Sampler::isReferenceVolumeTransport() ? 1.0 : std::pow(
 		this->_parameters.multipleScatteringFalloff,
 		static_cast<double>(Sampler::currentBounce())
 	);
 	const double epsilonT = std::max(1e-10, this->_featureScale * 1e-8 / rayLength);
-	if (
+	if (this->_parameters.directionalCache && !Sampler::isReferenceVolumeTransport() && (
 		Sampler::isVolumeControlSampling()
 		|| Sampler::isDirectionalShadowSampling()
-	)
+	))
 	{
 		double fullEntryT;
 		double fullExitT;
@@ -1136,7 +1136,14 @@ Color SparseGridVolume::singleScatteringCoefficientAt(
 	const Vector3& scatteredDirection
 ) const
 {
-	const double extinction = this->extinctionAt(position);
+	return singleScatteringWithExtinction(position, incidentDirection, scatteredDirection, extinctionAt(position));
+}
+
+Color SparseGridVolume::singleScatteringWithExtinction(
+	const Vector3& position, const Vector3& incidentDirection,
+	const Vector3& scatteredDirection, double extinction
+) const
+{
 	if (extinction <= 0.0)
 		return (Color(0.0, 0.0, 0.0));
 	HitRecord hitRecord;
@@ -1179,6 +1186,35 @@ double SparseGridVolume::multipleScatteringCompensation(void) const
 	return (this->_parameters.multipleScatteringCompensation);
 }
 
+double SparseGridVolume::integratedDirectionalOpticalDepth(const Ray& ray) const
+{
+	double entryT, exitT;
+	if (!this->boundsInterval(ray, 0.0, T_MAX, entryT, exitT))
+		return 0.0;
+	BrickTraversal traversal(this->worldToLocalRay(ray));
+	const double epsilonT = std::max(1e-10, this->_featureScale * 1e-8);
+	const int samples = Sampler::isVolumeControlSampling()
+		? std::max(1, this->_parameters.shadowSamplesPerBrick / 8)
+		: this->_parameters.shadowSamplesPerBrick;
+	double opticalDepth = 0.0;
+	for (double currentT = std::max(0.0, entryT); currentT < exitT; )
+	{
+		BrickSegment segment;
+		if (!this->segmentAtLocal(traversal, std::min(exitT, currentT + epsilonT), exitT, segment))
+			break;
+		if (segment.maximum > 0.0f)
+		{
+			const double stepT = (segment.exitT - currentT) / samples;
+			for (int sample = 0; sample < samples; sample++)
+				opticalDepth += this->_extinctionSceneUnits * stepT
+					* this->densityAtLocal(traversal.localRay.pointAtRay(currentT + (sample + 0.5) * stepT));
+		}
+		currentT = segment.exitT + epsilonT;
+	}
+	// Do not clamp at the transmittance cutoff: reconstruction needs deep tau.
+	return opticalDepth;
+}
+
 bool SparseGridVolume::directionalOpticalDepth(
 	const Vector3& position,
 	const Vector3& direction,
@@ -1189,6 +1225,14 @@ bool SparseGridVolume::directionalOpticalDepth(
 	if (!std::isfinite(lengthSquared) || lengthSquared <= VOLUME_EPSILON)
 		return (false);
 	const Vector3 normalizedDirection = direction / std::sqrt(lengthSquared);
+	if (!this->_parameters.directionalCache)
+	{
+		// Keep the reconstruction model supplied with optical depth when the
+		// cache is disabled. Returning false here would change sky/cavity fill.
+		opticalDepth = this->integratedDirectionalOpticalDepth(
+			Ray::fromNormalizedDirection(position, normalizedDirection));
+		return std::isfinite(opticalDepth);
+	}
 	const DirectionalTransmittanceCache* cache = this->directionalCache(
 		normalizedDirection
 	);

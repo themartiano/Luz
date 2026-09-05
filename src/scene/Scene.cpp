@@ -1014,3 +1014,17 @@ const SceneRenderStats&	Scene::getRenderStats(void) const
 {
 	return (this->_renderStats);
 }
+
+void Scene::setVolumePrimarySamples(int value)
+{
+	if (value < 1 || value > 256)
+		throw std::invalid_argument("Volume primary samples must be between 1 and 256.");
+	_volumePrimarySamples = static_cast<unsigned int>(value);
+}
+
+void Scene::setVolumePrimaryMaxSteps(int value)
+{
+	if (value < 48 || value > 65536)
+		throw std::invalid_argument("Volume primary max steps must be between 48 and 65536.");
+	_volumePrimaryMaxSteps = value;
+}
