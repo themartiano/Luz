@@ -8,8 +8,7 @@ scene files, and a Blender-to-Luz exporter.
 
 https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 
-<img width="1920" height="1080" alt="bust-statue" src="https://github.com/user-attachments/assets/3173b5c1-f81f-404a-8740-20635b583e5c" />
-
+<img width="1920" height="1080" alt="cloud-render" src="https://github.com/user-attachments/assets/55e01aa6-1135-4bc5-be92-92aefc432be9" />
 
 ## Features
 
@@ -19,8 +18,8 @@ https://github.com/user-attachments/assets/7dc03485-9418-47af-a7e7-c4c4c53b6b70
 - Adaptive sampling
 - Denoiser (NFOR-style)
 - Spheres, planes, rectangles, triangles, cubes, volumes, and OBJ meshes
-- Procedural clouds with cumulus, stratus, cirrus, and storm presets
-- Imported cloud volumes in the sparse `.luzvol` format (optional VDB converter)
+- Procedural cloud rendering and generation with cumulus, stratus, cirrus, and storm presets
+- Custom cloud volume format `.luzvol` with optional VDB converter
 - Scene-linear ACEScg rendering with sRGB input/output transforms
 - Spectral authoring helpers: wavelength, blackbody, solar, and reflectance curves
 - Lambertian, GGX metal, rough dielectric, layered principled with subsurface
@@ -112,6 +111,9 @@ See the [cloud reference](docs/scene-files.md#procedural-clouds) for customizati
 <img width="1920" height="1080" alt="bust-statue" src="https://github.com/user-attachments/assets/3173b5c1-f81f-404a-8740-20635b583e5c" />
 
 ##### by @[geoffreymarchal](https://blendswap.com/profile/180520) on [BlendSwap](https://blendswap.com/blend/21704)
+
+#### Clouds and a golden sunset
+<img width="1920" height="1080" alt="golden-clouds" src="https://github.com/user-attachments/assets/ff37f871-da10-41c0-b6fb-22efd9fcc52e" />
 
 #### [Cornell Box](https://en.wikipedia.org/wiki/Cornell_box)
 <img width="1920" height="1920" alt="cornell" src="https://github.com/user-attachments/assets/11d3b842-879e-4e30-b523-bed9678d43d8" />
